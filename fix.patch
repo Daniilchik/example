@@ -1,0 +1,179 @@
+Subject: [PATCH] Fix negative used bytes
+---
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3MultipartUploadAbortRequest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3MultipartUploadAbortRequest.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3MultipartUploadAbortRequest.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3MultipartUploadAbortRequest.java	(revision 21d30a840ad081696b788bc43eac9bc8b52bc3ff)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3MultipartUploadAbortRequest.java	(date 1761905756756)
+@@ -22,6 +22,8 @@
+ import java.nio.file.InvalidPathException;
+ import java.util.Map;
+ 
++import org.apache.hadoop.hdds.client.ECReplicationConfig;
++import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+ import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+ import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+ import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
+@@ -59,6 +61,7 @@
+ import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
+ import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+ 
++import static org.apache.hadoop.ozone.OmUtils.computeECPhysicalSizeForPart;
+ import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
+ 
+ /**
+@@ -177,12 +180,33 @@
+       // When abort uploaded key, we need to subtract the PartKey length from
+       // the volume usedBytes.
+       long quotaReleased = 0;
+-      for (PartKeyInfo iterPartKeyInfo : multipartKeyInfo.getPartKeyInfoMap()) {
+-        quotaReleased += QuotaUtil.getReplicatedSize(
+-            iterPartKeyInfo.getPartKeyInfo().getDataSize(),
+-            omKeyInfo.getReplicationConfig());
+-      }
+-      omBucketInfo.incrUsedBytes(-quotaReleased);
++      HddsProtos.ReplicationType keyReplication = multipartKeyInfo.getReplicationConfig().getReplicationType();
++
++      if (keyReplication == HddsProtos.ReplicationType.RATIS) {
++        int factor = multipartKeyInfo.getReplicationConfig().getRequiredNodes();
++        for (PartKeyInfo iterPartKeyInfo :
++                multipartKeyInfo.getPartKeyInfoMap()) {
++          quotaReleased +=
++                  iterPartKeyInfo.getPartKeyInfo().getDataSize() * factor;
++        }
++        omBucketInfo.incrUsedBytes(-quotaReleased);
++      } else if (keyReplication == HddsProtos.ReplicationType.EC) {
++
++        ECReplicationConfig ec = (ECReplicationConfig) multipartKeyInfo.getReplicationConfig();
++        int dataChunks = ec.getData();
++        int parityChunks = ec.getParity();
++        long chunkSize = ec.getEcChunkSize();
++
++        long totalPhysicalBytes = 0;
++
++        for (PartKeyInfo part : multipartKeyInfo.getPartKeyInfoMap()) {
++          long logicalSize = part.getPartKeyInfo().getDataSize();
++          totalPhysicalBytes += computeECPhysicalSizeForPart(
++                  logicalSize, dataChunks, parityChunks, chunkSize
++          );
++        }
++        omBucketInfo.incrUsedBytes(-totalPhysicalBytes);
++      }
+ 
+       // Update cache of openKeyTable and multipartInfo table.
+       // No need to add the cache entries to delete table, as the entries
+Index: hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java
+--- a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java	(revision 21d30a840ad081696b788bc43eac9bc8b52bc3ff)
++++ b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java	(date 1761904206958)
+@@ -723,6 +723,35 @@
+     return keyName;
+   }
+ 
++  public static long computeECPhysicalSizeForPart(long logicalSize, int dataChunks,
++             int parityChunks, long chunkSize) {
++    long stripeDataCapacity = (long) dataChunks * chunkSize;
++
++    long fullStripes = logicalSize / stripeDataCapacity;
++    long remainderBytes = logicalSize % stripeDataCapacity;
++
++    long fullStripesBytes =
++            fullStripes * (dataChunks + parityChunks) * chunkSize;
++
++    if (remainderBytes == 0) {
++      // No partial stripes
++      return fullStripesBytes;
++    }
++
++    long usedDataChunks =
++            (long) Math.ceil((double) remainderBytes / chunkSize);
++
++    // Should never exceed dataChunks
++    if (usedDataChunks > dataChunks) {
++      usedDataChunks = dataChunks;
++    }
++
++    long partialStripeBytes =
++            (usedDataChunks + parityChunks) * chunkSize;
++
++    return fullStripesBytes + partialStripeBytes;
++  }
++
+ 
+   /**
+    * For a given service ID, return list of configured OM hosts.
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3ExpiredMultipartUploadsAbortRequest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3ExpiredMultipartUploadsAbortRequest.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3ExpiredMultipartUploadsAbortRequest.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3ExpiredMultipartUploadsAbortRequest.java	(revision 21d30a840ad081696b788bc43eac9bc8b52bc3ff)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/s3/multipart/S3ExpiredMultipartUploadsAbortRequest.java	(date 1761905756764)
+@@ -20,6 +20,8 @@
+ package org.apache.hadoop.ozone.om.request.s3.multipart;
+ 
+ import com.google.common.base.Optional;
++import org.apache.hadoop.hdds.client.ECReplicationConfig;
++import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+ import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
+ import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+ import org.apache.hadoop.ozone.audit.OMAction;
+@@ -53,6 +55,8 @@
+ import java.util.List;
+ import java.util.Map;
+ 
++import static org.apache.hadoop.hdds.client.ReplicationType.RATIS;
++import static org.apache.hadoop.ozone.OmUtils.computeECPhysicalSizeForPart;
+ import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
+ 
+ /**
+@@ -275,15 +279,33 @@
+           // When abort uploaded key, we need to subtract the PartKey length
+           // from the volume usedBytes.
+           long quotaReleased = 0;
+-          int keyFactor = omMultipartKeyInfo.getReplicationConfig()
+-              .getRequiredNodes();
+-          for (PartKeyInfo iterPartKeyInfo : omMultipartKeyInfo.
+-              getPartKeyInfoMap()) {
+-            quotaReleased +=
+-                iterPartKeyInfo.getPartKeyInfo().getDataSize() * keyFactor;
+-          }
+-          omBucketInfo.incrUsedBytes(-quotaReleased);
++          HddsProtos.ReplicationType keyReplication = omMultipartKeyInfo.getReplicationConfig().getReplicationType();
++
++          if (keyReplication == HddsProtos.ReplicationType.RATIS) {
++            int factor = omMultipartKeyInfo.getReplicationConfig().getRequiredNodes();
++            for (PartKeyInfo iterPartKeyInfo :
++                    omMultipartKeyInfo.getPartKeyInfoMap()) {
++              quotaReleased +=
++                      iterPartKeyInfo.getPartKeyInfo().getDataSize() * factor;
++            }
++            omBucketInfo.incrUsedBytes(-quotaReleased);
++          } else if (keyReplication == HddsProtos.ReplicationType.EC) {
++
++            ECReplicationConfig ec = (ECReplicationConfig) omMultipartKeyInfo.getReplicationConfig();
++            int dataChunks = ec.getData();
++            int parityChunks = ec.getParity();
++            long chunkSize = ec.getEcChunkSize();
+ 
++            long totalPhysicalBytes = 0;
++
++            for (PartKeyInfo part : omMultipartKeyInfo.getPartKeyInfoMap()) {
++              long logicalSize = part.getPartKeyInfo().getDataSize();
++              totalPhysicalBytes += computeECPhysicalSizeForPart(
++                      logicalSize, dataChunks, parityChunks, chunkSize
++              );
++            }
++            omBucketInfo.incrUsedBytes(-totalPhysicalBytes);
++          }
+           OmMultipartAbortInfo omMultipartAbortInfo =
+               new OmMultipartAbortInfo.Builder()
+                   .setMultipartKey(expiredMPUKeyName)
