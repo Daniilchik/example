@@ -1,0 +1,85 @@
+Subject: [PATCH] test
+---
+Index: hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/request/s3/multipart/TestS3ExpiredMultipartUploadsAbortRequest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/request/s3/multipart/TestS3ExpiredMultipartUploadsAbortRequest.java b/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/request/s3/multipart/TestS3ExpiredMultipartUploadsAbortRequest.java
+--- a/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/request/s3/multipart/TestS3ExpiredMultipartUploadsAbortRequest.java	(revision 21d30a840ad081696b788bc43eac9bc8b52bc3ff)
++++ b/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/request/s3/multipart/TestS3ExpiredMultipartUploadsAbortRequest.java	(date 1763102407856)
+@@ -20,6 +20,7 @@
+ package org.apache.hadoop.ozone.om.request.s3.multipart;
+ 
+ import com.google.common.base.Optional;
++import org.apache.hadoop.hdds.client.ECReplicationConfig;
+ import org.apache.hadoop.hdds.client.ReplicationConfig;
+ import org.apache.hadoop.hdds.client.ReplicationFactor;
+ import org.apache.hadoop.hdds.client.ReplicationType;
+@@ -28,15 +29,10 @@
+ import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
+ import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+ import org.apache.hadoop.ozone.om.OMMetrics;
+-import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
+-import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
++import org.apache.hadoop.ozone.om.helpers.*;
+ import org.apache.hadoop.ozone.om.request.OMRequestTestUtils;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
+     .Status;
+-import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+-import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.WithObjectID;
+ import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
+ import org.apache.hadoop.ozone.om.response.OMClientResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+@@ -310,6 +306,49 @@
+         metrics.getNumExpiredMPUPartsAborted());
+   }
+ 
++  /**
++   * Verify that aborting expired MPUs does not make bucket usedBytes negative.
++   */
++  @ParameterizedTest
++  @MethodSource("bucketLayouts")
++  public void testAbortExpiredMPUsDoesNotMakeUsedBytesNegative(
++          BucketLayout buckLayout) throws Exception {
++    this.bucketLayout = buckLayout;
++
++    final String volumeName = UUID.randomUUID().toString();
++    final String bucketName = UUID.randomUUID().toString();
++    final String keyName = UUID.randomUUID().toString();
++
++    OMRequestTestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
++            omMetadataManager, getBucketLayout());
++
++    final int numMPUs = 1;
++    final int numParts = 1;
++
++    List<String> mpuKeys = createMPUs(volumeName, bucketName, keyName,
++            numMPUs, numParts, getBucketLayout());
++
++    String bucketKey =
++            omMetadataManager.getBucketKey(volumeName, bucketName);
++    OmBucketInfo bucketInfoBefore =
++            omMetadataManager.getBucketTable().get(bucketKey);
++    long usedBytesBefore = bucketInfoBefore.getUsedBytes();
++
++    Assertions.assertTrue(usedBytesBefore > 0,
++            "Expected bucket usedBytes to be > 0 before aborting expired MPUs");
++
++    abortExpiredMPUsFromCache(volumeName, bucketName, mpuKeys);
++    Thread.sleep(5000);
++    OmBucketInfo bucketInfoAfter =
++            omMetadataManager.getBucketTable().get(bucketKey);
++    long usedBytesAfter = bucketInfoAfter.getUsedBytes();
++
++    Assertions.assertEquals(0L, usedBytesAfter,
++            "Bucket usedBytes should be 0 after aborting expired MPUs");
++    Assertions.assertTrue(usedBytesAfter >= 0,
++            "Bucket usedBytes must not be negative after aborting expired MPUs");
++  }
++
+   /**
+    * Constructs a new {@link S3ExpiredMultipartUploadsAbortRequest} objects,
+    * and calls its {@link S3ExpiredMultipartUploadsAbortRequest#preExecute}
