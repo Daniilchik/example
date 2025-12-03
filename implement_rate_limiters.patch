@@ -1,0 +1,2376 @@
+Subject: [PATCH] implement rate limiters
+---
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/ListRateLimitersRequest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/ListRateLimitersRequest.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/ListRateLimitersRequest.java
+new file mode 100644
+--- /dev/null	(date 1764205263298)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/ListRateLimitersRequest.java	(date 1764205263298)
+@@ -0,0 +1,118 @@
++package org.apache.hadoop.ozone.om.request.ratelimiter;
++
++import org.apache.hadoop.hdds.utils.db.Table;
++import org.apache.hadoop.hdds.utils.db.TableIterator;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
++import org.apache.hadoop.ozone.om.OzoneManager;
++import org.apache.hadoop.ozone.om.helpers.RateLimiterInfo;
++import org.apache.hadoop.ozone.om.request.OMClientRequest;
++import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
++import org.apache.hadoop.ozone.om.response.OMClientResponse;
++import org.apache.hadoop.ozone.om.response.ratelimiter.ListRateLimitersResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.List;
++
++public class ListRateLimitersRequest extends OMClientRequest {
++  public static final Logger LOG = LoggerFactory.getLogger(ListRateLimitersRequest.class);
++
++  public ListRateLimitersRequest(OMRequest omRequest) {
++    super(omRequest);
++  }
++
++  @Override
++  public OMClientResponse validateAndUpdateCache(
++          OzoneManager ozoneManager, long trxnLogIndex) {
++
++    OMRequest omRequest = getOmRequest();
++    OzoneManagerProtocolProtos.ListRateLimiterRequest request =
++            omRequest.getListRateLimiterRequest();
++
++    OMMetadataManager metadataManager = ozoneManager.getMetadataManager();
++    OzoneManagerProtocolProtos.OMResponse.Builder omResponse =
++            OmResponseUtil.getOMResponseBuilder(omRequest);
++
++    OzoneManagerProtocolProtos.Status status = OzoneManagerProtocolProtos.Status.OK;
++    String errorMsg = null;
++
++    String filterVolume = request.getVolumeName();
++    if (filterVolume != null && filterVolume.isEmpty()) {
++      filterVolume = null;
++    }
++
++    String filterBucket = request.getBucketName();
++    if (filterBucket != null && filterBucket.isEmpty()) {
++      filterBucket = null;
++    }
++
++    RateLimiterType filterType = request.hasType() ? request.getType() : null;
++
++    List<OzoneManagerProtocolProtos.RateLimiter> result = new ArrayList<>();
++
++    try {
++      Table<String, RateLimiterInfo> table =
++              metadataManager.getRateLimiterInfoTable();
++
++      try (TableIterator<String,
++                    ? extends Table.KeyValue<String, RateLimiterInfo>> iter =
++                   table.iterator()) {
++        while (iter.hasNext()) {
++          Table.KeyValue<String, RateLimiterInfo> kv = iter.next();
++          RateLimiterInfo info = kv.getValue();
++
++          if (!matchesFilter(info, filterVolume, filterBucket, filterType)) {
++            continue;
++          }
++
++          result.add(info.toProtobuf());
++        }
++      }
++
++      LOG.debug("Listed {} rate limiters (volume={}, bucket={}, type={})",
++              result.size(), filterVolume, filterBucket, filterType);
++
++    } catch (IOException e) {
++      status = OzoneManagerProtocolProtos.Status.INTERNAL_ERROR;
++      errorMsg = "Failed to list rate limiters: " + e.getMessage();
++      LOG.error(errorMsg, e);
++    }
++
++    OzoneManagerProtocolProtos.ListRateLimiterResponse.Builder listRespBuilder =
++            OzoneManagerProtocolProtos.ListRateLimiterResponse.newBuilder()
++                    .addAllRateLimiters(result);
++
++    omResponse.setStatus(status)
++            .setListRateLimiterResponse(listRespBuilder.build());
++
++    if (errorMsg != null) {
++      omResponse.setMessage(errorMsg);
++    }
++
++    return new ListRateLimitersResponse(omResponse.build());
++  }
++
++  private boolean matchesFilter(RateLimiterInfo info,
++                                String filterVolume,
++                                String filterBucket,
++                                RateLimiterType filterType) {
++    if (filterVolume != null &&
++            !filterVolume.equals(info.getVolumeName())) {
++      return false;
++    }
++    if (filterBucket != null &&
++            !filterBucket.equals(info.getBucketName())) {
++      return false;
++    }
++    if (filterType != null &&
++            filterType != info.getType()) {
++      return false;
++    }
++    return true;
++  }
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/DeleteRateLimiterRequest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/DeleteRateLimiterRequest.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/DeleteRateLimiterRequest.java
+new file mode 100644
+--- /dev/null	(date 1764310339227)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/DeleteRateLimiterRequest.java	(date 1764310339227)
+@@ -0,0 +1,128 @@
++package org.apache.hadoop.ozone.om.request.ratelimiter;
++
++import javassist.NotFoundException;
++import org.apache.hadoop.hdds.utils.db.Table;
++import org.apache.hadoop.ozone.audit.AuditLogger;
++import org.apache.hadoop.ozone.audit.OMAction;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
++import org.apache.hadoop.ozone.om.OzoneManager;
++import org.apache.hadoop.ozone.om.helpers.RateLimiterInfo;
++import org.apache.hadoop.ozone.om.request.OMClientRequest;
++import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
++import org.apache.hadoop.ozone.om.response.OMClientResponse;
++import org.apache.hadoop.ozone.om.response.ratelimiter.DeleteRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.io.IOException;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
++import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.INVALID_REQUEST;
++import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.OK;
++import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.KEY_NOT_FOUND;
++import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.INTERNAL_ERROR;
++
++public class DeleteRateLimiterRequest extends OMClientRequest {
++  public static final Logger LOG = LoggerFactory.getLogger(DeleteRateLimiterRequest.class);
++
++  public DeleteRateLimiterRequest(OMRequest omRequest) {
++    super(omRequest);
++  }
++
++  @Override
++  public OMClientResponse validateAndUpdateCache(
++          OzoneManager ozoneManager, long trxnLogIndex) {
++
++    OMRequest omRequest = getOmRequest();
++    OzoneManagerProtocolProtos.DeleteRateLimiterRequest request =
++            omRequest.getDeleteRateLimiterRequest();
++
++    String volumeName = request.getVolumeName();
++    String bucketName = request.getBucketName();
++    OzoneManagerProtocolProtos.RateLimiterType type = request.getType();
++
++    OMMetadataManager metadataManager = ozoneManager.getMetadataManager();
++    OzoneManagerProtocolProtos.OMResponse.Builder omResponse =
++            OmResponseUtil.getOMResponseBuilder(omRequest);
++
++    AuditLogger auditLogger = ozoneManager.getAuditLogger();
++    OzoneManagerProtocolProtos.UserInfo userInfo = getOmRequest().getUserInfo();
++
++    boolean bucketLockAcquired = false;
++    OzoneManagerProtocolProtos.Status status = OK;
++    String errorMsg = null;
++    Exception exception = null;
++
++    try {
++      metadataManager.getLock()
++              .acquireWriteLock(BUCKET_LOCK, volumeName, bucketName);
++      bucketLockAcquired = true;
++
++      if (volumeName.isEmpty()) {
++        status = INVALID_REQUEST;
++        errorMsg = "Volume name must not be empty.";
++      } else if (bucketName.isEmpty()) {
++        status = INVALID_REQUEST;
++        errorMsg = "Bucket name must not be empty.";
++      }
++
++      if (status == OK) {
++        Table<String, RateLimiterInfo> table =
++                metadataManager.getRateLimiterInfoTable();
++
++        String key = volumeName + ":" + bucketName;
++        RateLimiterInfo existing = null;
++          try {
++          existing = table.get(key);
++        } catch (IOException e) {
++          LOG.error("Cannot find ratelimiter for: {}", key);
++        }
++        if (existing == null) {
++          status = KEY_NOT_FOUND;
++          errorMsg = "Rate limiter not found for key " + key;
++        } else {
++          table.delete(key);
++          ozoneManager.getRateLimiterManager()
++                  .delete(volumeName, bucketName, type);
++          LOG.info("Deleted rate limiter: key={}, type={}", key, type);
++        }
++      }
++
++    } catch (IOException e) {
++      exception = e;
++      status = INTERNAL_ERROR;
++      errorMsg = "Failed to delete rate limiter for volume=" + volumeName
++              + ", bucket=" + bucketName + ": " + e.getMessage();
++      LOG.error(errorMsg, e);
++    } finally {
++      if (bucketLockAcquired) {
++        metadataManager.getLock()
++                .releaseWriteLock(BUCKET_LOCK, volumeName, bucketName);
++      }
++    }
++
++    OzoneManagerProtocolProtos.DeleteRateLimiterResponse.Builder deleteRespBuilder =
++            OzoneManagerProtocolProtos.DeleteRateLimiterResponse.newBuilder();
++
++    omResponse.setStatus(status)
++            .setDeleteRateLimiterResponse(deleteRespBuilder.build());
++
++    Map<String, String> auditMap = new LinkedHashMap<>();
++    auditMap.put("volume", volumeName);
++    auditMap.put("bucket", bucketName);
++    auditMap.put("type", type.name());
++
++    auditLog(auditLogger, buildAuditMessage(OMAction.DELETE_RATELIMITER,
++            auditMap, exception, userInfo));
++
++    if (errorMsg != null) {
++      omResponse.setMessage(errorMsg);
++    }
++
++    return new DeleteRateLimiterResponse(omResponse.build());
++  }
++}
+Index: hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java b/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java
+new file mode 100644
+--- /dev/null	(date 1764756647727)
++++ b/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java	(date 1764756647727)
+@@ -0,0 +1,27 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ *  with the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ */
++package org.apache.hadoop.ozone.om.ratelimiter;
++//
++//import org.junit.Test;
++//
++//import static org.junit.Assert.assertTrue;
++//import static org.junit.Assert.assertFalse;
++//
++//public class TestLeakyBucketRateLimiter {
++//
++//}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiterHelper.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiterHelper.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiterHelper.java
+new file mode 100644
+--- /dev/null	(date 1764224292317)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiterHelper.java	(date 1764224292317)
+@@ -0,0 +1,55 @@
++package org.apache.hadoop.ozone.om.ratelimiter;
++
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type;
++
++import java.util.EnumSet;
++
++public class RateLimiterHelper {
++    public static final EnumSet<OzoneManagerProtocolProtos.Type> RATE_LIMITED_READ_CMDS = EnumSet.of(
++            Type.LookupKey,
++            Type.ListKeys,
++            Type.ListKeysLight,
++            Type.GetFileStatus,
++            Type.LookupFile,
++            Type.ListStatus,
++            Type.ListStatusLight,
++            Type.GetKeyInfo,
++            Type.InfoBucket,
++            Type.ListBuckets,
++            Type.ListTrash,
++            Type.ListMultiPartUploadParts,
++            Type.ListMultipartUploads,
++            Type.CancelSnapshotDiff,
++            Type.ListSnapshot,
++            Type.SnapshotDiff,
++            Type.ListSnapshotDiffJobs,
++            Type.GetSnapshotInfo,
++            Type.GetContentSummary
++    );
++
++    public static final EnumSet<OzoneManagerProtocolProtos.Type> RATE_LIMITED_WRITE_CMDS = EnumSet.of(
++            Type.CreateKey,
++            Type.DeleteKey,
++            Type.CreateFile,
++            Type.DeleteKeys,
++            Type.CreateBucket,
++            Type.DeleteBucket,
++            Type.SetBucketProperty,
++            Type.PurgeKeys,
++            Type.CreateSnapshot,
++            Type.DeleteSnapshot,
++            Type.RenameSnapshot,
++            Type.RecoverLease,
++            Type.CreateDirectory,
++            Type.AllocateBlock,
++            Type.CommitKey,
++            Type.RenameKey,
++            Type.RenameKeys,
++            Type.InitiateMultiPartUpload,
++            Type.CommitMultiPartUpload,
++            Type.AbortMultiPartUpload,
++            Type.CompleteMultiPartUpload,
++            Type.SetTimes
++    );
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/utils/OzoneManagerRatisUtils.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/utils/OzoneManagerRatisUtils.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/utils/OzoneManagerRatisUtils.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/utils/OzoneManagerRatisUtils.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/utils/OzoneManagerRatisUtils.java	(date 1764104582673)
+@@ -63,6 +63,9 @@
+ import org.apache.hadoop.ozone.om.request.key.acl.prefix.OMPrefixAddAclRequest;
+ import org.apache.hadoop.ozone.om.request.key.acl.prefix.OMPrefixRemoveAclRequest;
+ import org.apache.hadoop.ozone.om.request.key.acl.prefix.OMPrefixSetAclRequest;
++import org.apache.hadoop.ozone.om.request.ratelimiter.CreateRateLimiterRequest;
++import org.apache.hadoop.ozone.om.request.ratelimiter.DeleteRateLimiterRequest;
++import org.apache.hadoop.ozone.om.request.ratelimiter.ListRateLimitersRequest;
+ import org.apache.hadoop.ozone.om.request.s3.multipart.S3ExpiredMultipartUploadsAbortRequest;
+ import org.apache.hadoop.ozone.om.request.s3.security.OMSetSecretRequest;
+ import org.apache.hadoop.ozone.om.request.s3.security.S3GetSecretRequest;
+@@ -350,6 +353,12 @@
+       return new OMBucketRaftGroupsStateUpdateRequest(omRequest);
+     case MoveOmToSafeMode:
+       return new OMMoveToSafeModeRequest(omRequest);
++    case CreateRateLimiter:
++      return new CreateRateLimiterRequest(omRequest);
++    case DeleteRateLimiter:
++      return new DeleteRateLimiterRequest(omRequest);
++    case ListRateLimiter:
++      return new ListRateLimitersRequest(omRequest);
+     default:
+       throw new OMException("Unrecognized write command type request "
+           + cmdType, OMException.ResultCodes.INVALID_REQUEST);
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OzoneManager.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OzoneManager.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OzoneManager.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OzoneManager.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OzoneManager.java	(date 1764225751715)
+@@ -401,6 +401,7 @@
+   private BucketManager bucketManager;
+   private KeyManager keyManager;
+   private PrefixManagerImpl prefixManager;
++  private RateLimiterManager rateLimiterManager;
+   private final UpgradeFinalizer<OzoneManager> upgradeFinalizer;
+ 
+   /**
+@@ -787,6 +788,9 @@
+     omSafeModeManager = new SafeModeManager(configuration);
+     bucketRaftGroupsReconciler = new BucketRaftGroupsReconciler(this);
+ 
++    rateLimiterManager = new RateLimiterManager(metadataManager);
++    rateLimiterManager.loadFromDb();
++
+     if (this.getOmRatisServer() != null) {
+       this.getOmRatisServer().startSchedulingLeaderReconfiguration();
+     }
+@@ -1740,6 +1744,11 @@
+     return keyManager;
+   }
+ 
++  @VisibleForTesting
++  public RateLimiterManager getRateLimiterManager() {
++    return rateLimiterManager;
++  }
++
+   @VisibleForTesting
+   public OMStorage getOmStorage() {
+     return omStorage;
+Index: hadoop-ozone/interface-client/src/main/proto/OmClientProtocol.proto
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/interface-client/src/main/proto/OmClientProtocol.proto b/hadoop-ozone/interface-client/src/main/proto/OmClientProtocol.proto
+--- a/hadoop-ozone/interface-client/src/main/proto/OmClientProtocol.proto	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/interface-client/src/main/proto/OmClientProtocol.proto	(date 1764221235949)
+@@ -153,6 +153,9 @@
+   BucketRaftGroupsStateChanged = 146;
+   MoveOmToSafeMode = 147;
+   RefreshBucketUsedBytes = 148;
++  CreateRateLimiter = 149;
++  DeleteRateLimiter = 150;
++  ListRateLimiter = 151;
+ }
+ 
+ enum SafeMode {
+@@ -162,6 +165,12 @@
+     GET = 4;
+ }
+ 
++enum RateLimiterType {
++   READ = 1;
++   WRITE = 2;
++}
++
++
+ message OMRequest {
+   required Type cmdType = 1; // Type of the command
+ 
+@@ -297,6 +306,9 @@
+   optional hadoop.hdds.UUID                 raftGroupId                    = 146; // Used for raft group that the request should be executed in
+   optional BucketRaftGroupsStateChangedRequest bucketRaftGroupsStateChangedRequest = 147; // Used to notify OM about bucket raft groups state changes
+   optional RefreshBucketUsedBytesRequest    refreshBucketUsedBytesRequest = 148;
++  optional CreateRateLimiterRequest         createRateLimiterRequest = 149;
++  optional DeleteRateLimiterRequest         deleteRateLimiterRequest = 150;
++  optional ListRateLimiterRequest           listRateLimiterRequest = 151;
+ }
+ 
+ message OMResponse {
+@@ -425,6 +437,9 @@
+   optional GetRaftGroupHealthStateResponse   getRaftGroupHealthStateResponse     = 145;
+   optional BucketRaftGroupsStateChangedResponse bucketRaftGroupsStateChangedResponse = 146;
+   optional RefreshBucketUsedBytesResponse    refreshBucketUsedBytesResponse = 147;
++  optional CreateRateLimiterResponse         createRateLimiterResponse = 148;
++  optional DeleteRateLimiterResponse         deleteRateLimiterResponse = 149;
++  optional ListRateLimiterResponse           listRateLimiterResponse = 150;
+ }
+ 
+ enum Status {
+@@ -548,6 +563,7 @@
+     INVALID_PATH = 93;
+ 
+     TOO_MANY_BUCKETS = 94;
++    RATE_LIMIT_EXCEEDED = 95;
+ }
+ 
+ /**
+@@ -2206,6 +2222,43 @@
+   required uint64 usedBytes = 1;
+ }
+ 
++message CreateRateLimiterRequest {
++  required string volumeName = 1;
++  required string bucketName = 2;
++  required int32 rps = 3;
++  required RateLimiterType type = 4;
++}
++
++message CreateRateLimiterResponse {
++  required RateLimiter rateLimiter = 1;
++}
++
++message RateLimiter {
++  required string volumeName = 1;
++  required string bucketName = 2;
++  required int32 rps = 3;
++  required RateLimiterType type = 4;
++}
++
++message DeleteRateLimiterRequest {
++  optional string volumeName = 1;
++  optional string bucketName = 2;
++  optional RateLimiterType type = 3;
++}
++
++message DeleteRateLimiterResponse {
++}
++
++message ListRateLimiterRequest {
++  required string volumeName = 1;
++  required string bucketName = 2;
++  required RateLimiterType type = 3;
++}
++
++message ListRateLimiterResponse {
++  repeated RateLimiter rateLimiters = 1;
++}
++
+ /**
+  The OM service that takes care of Ozone namespace.
+ */
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiter.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiter.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiter.java
+new file mode 100644
+--- /dev/null	(date 1764218310945)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/RateLimiter.java	(date 1764218310945)
+@@ -0,0 +1,6 @@
++package org.apache.hadoop.ozone.om.ratelimiter;
++
++public interface RateLimiter {
++
++  boolean tryAcquire();
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/LeakyBucketRateLimiter.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/LeakyBucketRateLimiter.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/LeakyBucketRateLimiter.java
+new file mode 100644
+--- /dev/null	(date 1764218377061)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratelimiter/LeakyBucketRateLimiter.java	(date 1764218377061)
+@@ -0,0 +1,59 @@
++package org.apache.hadoop.ozone.om.ratelimiter;
++
++import java.util.concurrent.locks.Lock;
++import java.util.concurrent.locks.ReentrantLock;
++
++public class LeakyBucketRateLimiter implements RateLimiter {
++
++    private final double capacity;
++    private final double leakRatePerNano;
++
++    private double water;
++    private long lastUpdateNanos;
++    private final Lock lock = new ReentrantLock();
++
++    public LeakyBucketRateLimiter(int rps, int capacity) {
++        if (rps <= 0) {
++            throw new IllegalArgumentException("rps must be > 0");
++        }
++        if (capacity <= 0) {
++            throw new IllegalArgumentException("capacity must be > 0");
++        }
++        this.capacity = capacity;
++        this.leakRatePerNano = (double) rps / 1_000_000_000L;
++        this.water = 0.0;
++        this.lastUpdateNanos = System.nanoTime();
++    }
++
++    public LeakyBucketRateLimiter(int rps) {
++        this(rps, rps);
++    }
++
++    @Override
++    public boolean tryAcquire() {
++        lock.lock();
++        try {
++            long now = System.nanoTime();
++            leakOldRequests(now);
++
++            if (water >= capacity) {
++                return false;
++            }
++
++            water += 1.0;
++            return true;
++        } finally {
++            lock.unlock();
++        }
++    }
++
++    private void leakOldRequests(long nowNanos) {
++        long elapsed = nowNanos - lastUpdateNanos;
++        if (elapsed <= 0) {
++            return;
++        }
++        double leaked = elapsed * leakRatePerNano;
++        water = Math.max(0.0, water - leaked);
++        lastUpdateNanos = nowNanos;
++    }
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/protocolPB/OzoneManagerRequestHandler.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/protocolPB/OzoneManagerRequestHandler.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/protocolPB/OzoneManagerRequestHandler.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/protocolPB/OzoneManagerRequestHandler.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/protocolPB/OzoneManagerRequestHandler.java	(date 1764221553047)
+@@ -38,9 +38,11 @@
+ import org.apache.hadoop.hdds.protocol.proto.HddsProtos.UpgradeFinalizationStatus;
+ import org.apache.hadoop.hdds.client.ReplicationConfig;
+ import org.apache.hadoop.hdds.utils.FaultInjector;
++import org.apache.hadoop.hdds.utils.db.BatchOperation;
+ import org.apache.hadoop.ozone.ContentSummary;
+ import org.apache.hadoop.ozone.OzoneAcl;
+ import org.apache.hadoop.ozone.common.PayloadUtils;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
+ import org.apache.hadoop.ozone.om.OzoneManager;
+ import org.apache.hadoop.ozone.om.OzoneManagerPrepareState;
+ import org.apache.hadoop.ozone.om.exceptions.OMException;
+@@ -192,6 +194,19 @@
+     if (LOG.isDebugEnabled()) {
+       LOG.debug("Received OMRequest: {}, ", request);
+     }
++
++    if (!getOzoneManager()
++            .getRateLimiterManager()
++            .tryAcquire(request, false)) {
++
++      OMResponse.Builder resp = OmResponseUtil.getOMResponseBuilder(request)
++              .setSuccess(false)
++              .setStatus(OzoneManagerProtocolProtos.Status.RATE_LIMIT_EXCEEDED)
++              .setMessage("Rate limit exceeded");
++
++      return resp.build();
++    }
++
+     Type cmdType = request.getCmdType();
+     OMResponse.Builder responseBuilder = OmResponseUtil.getOMResponseBuilder(
+         request);
+@@ -411,6 +426,17 @@
+   public OMClientResponse handleWriteRequest(OMRequest omRequest,
+       long transactionLogIndex) throws IOException {
+     injectPause();
++    if (!getOzoneManager()
++            .getRateLimiterManager()
++            .tryAcquire(omRequest, true)) {
++
++      OMResponse.Builder resp = OmResponseUtil.getOMResponseBuilder(omRequest)
++              .setSuccess(false)
++              .setStatus(OzoneManagerProtocolProtos.Status.RATE_LIMIT_EXCEEDED)
++              .setMessage("Rate limit exceeded");
++
++      return new OMGenericClientResponse(resp.build());
++    }
+     OMClientRequest omClientRequest =
+         OzoneManagerRatisUtils.createClientRequest(omRequest, impl);
+     return captureLatencyNs(
+@@ -1546,4 +1572,15 @@
+           safeMode);
+     }
+   }
++
++  private class OMGenericClientResponse extends OMClientResponse {
++    public OMGenericClientResponse(OMResponse omResponse) {
++      super(omResponse);
++    }
++
++    @Override
++    protected void addToDBBatch(OMMetadataManager omMetadataManager, BatchOperation batchOperation) throws IOException {
++      //NOOP
++    }
++  }
+ }
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/RateLimiterManager.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/RateLimiterManager.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/RateLimiterManager.java
+new file mode 100644
+--- /dev/null	(date 1764224292312)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/RateLimiterManager.java	(date 1764224292312)
+@@ -0,0 +1,360 @@
++package org.apache.hadoop.ozone.om;
++
++import java.io.IOException;
++import java.util.EnumSet;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentMap;
++
++import org.apache.hadoop.hdds.utils.db.Table;
++import org.apache.hadoop.hdds.utils.db.TableIterator;
++import org.apache.hadoop.ozone.om.helpers.RateLimiterInfo;
++import org.apache.hadoop.ozone.om.ratelimiter.RateLimiter;
++import org.apache.hadoop.ozone.om.ratelimiter.LeakyBucketRateLimiter;
++import org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import static org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper.RATE_LIMITED_READ_CMDS;
++import static org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper.RATE_LIMITED_WRITE_CMDS;
++
++public class RateLimiterManager {
++
++    private static final Logger LOG = LoggerFactory.getLogger(RateLimiterManager.class);
++
++    private final ConcurrentMap<String, BucketLimiters> limitersByBucket =
++            new ConcurrentHashMap<>();
++
++    private final OMMetadataManager metadataManager;
++
++    public RateLimiterManager(OMMetadataManager metadataManager) {
++        this.metadataManager = metadataManager;
++    }
++
++    public void loadFromDb() throws IOException {
++        Table<String, RateLimiterInfo> table =
++                metadataManager.getRateLimiterInfoTable();
++
++        int count = 0;
++        try (TableIterator<String,
++                ? extends Table.KeyValue<String, RateLimiterInfo>> iter =
++                     table.iterator()) {
++            while (iter.hasNext()) {
++                Table.KeyValue<String, RateLimiterInfo> kv = iter.next();
++                RateLimiterInfo info = kv.getValue();
++                registerInMemory(info);
++                count++;
++            }
++        }
++        LOG.info("Loaded {} rate limiters from OM DB into memory", count);
++    }
++
++    public void createOrUpdate(RateLimiterInfo info) {
++        String bucketKey = metadataManager.getBucketKey(
++                info.getVolumeName(), info.getBucketName());
++
++        limitersByBucket.compute(bucketKey, (k, existing) -> {
++            BucketLimiters bl = (existing != null) ? existing : new BucketLimiters();
++            if (info.getType() == RateLimiterType.READ) {
++                bl.readLimiter = new LeakyBucketRateLimiter(info.getRps());
++            } else {
++                bl.writeLimiter = new LeakyBucketRateLimiter(info.getRps());
++            }
++            return bl;
++        });
++
++        LOG.debug("Registered/updated rate limiter in memory: bucketKey={}, type={}, rps={}",
++                bucketKey, info.getType(), info.getRps());
++    }
++
++    public void delete(String volume, String bucket, RateLimiterType type) {
++        String bucketKey = metadataManager.getBucketKey(volume, bucket);
++
++        limitersByBucket.computeIfPresent(bucketKey, (k, bl) -> {
++            if (type == RateLimiterType.READ) {
++                bl.readLimiter = null;
++            } else {
++                bl.writeLimiter = null;
++            }
++            if (bl.readLimiter == null && bl.writeLimiter == null) {
++                return null;
++            }
++            return bl;
++        });
++
++        LOG.debug("Removed rate limiter from memory: bucketKey={}, type={}",
++                bucketKey, type);
++    }
++
++    public boolean tryAcquire(OzoneManagerProtocolProtos.OMRequest request, boolean isWrite) {
++        OzoneManagerProtocolProtos.Type cmdType = request.getCmdType();
++
++        if (isWrite) {
++            if (!RATE_LIMITED_WRITE_CMDS.contains(cmdType)) {
++                return true;
++            }
++        } else {
++            if (!RATE_LIMITED_READ_CMDS.contains(cmdType)) {
++                return true;
++            }
++        }
++
++        VolumeBucketKey vb = extractVolumeBucket(cmdType, request);
++        if (vb == null) {
++            return true;
++        }
++
++        OzoneManagerProtocolProtos.RateLimiterType rlType =
++                isWrite
++                        ? OzoneManagerProtocolProtos.RateLimiterType.WRITE
++                        : OzoneManagerProtocolProtos.RateLimiterType.READ;
++
++        return tryAcquire(vb.volume, vb.bucket, rlType);
++    }
++
++    public boolean tryAcquire(String volume, String bucket, RateLimiterType type) {
++        String bucketKey = metadataManager.getBucketKey(volume, bucket);
++        BucketLimiters bl = limitersByBucket.get(bucketKey);
++        if (bl == null) {
++            return true;
++        }
++
++        RateLimiter limiter =
++                (type == RateLimiterType.READ) ? bl.readLimiter : bl.writeLimiter;
++
++        if (limiter == null) {
++            return true;
++        }
++
++        return limiter.tryAcquire();
++    }
++
++    private void registerInMemory(RateLimiterInfo info) {
++        String bucketKey = metadataManager.getBucketKey(
++                info.getVolumeName(), info.getBucketName());
++
++        BucketLimiters bl = limitersByBucket.computeIfAbsent(
++                bucketKey, k -> new BucketLimiters());
++
++        if (info.getType() == RateLimiterType.READ) {
++            bl.readLimiter = new LeakyBucketRateLimiter(info.getRps());
++        } else {
++            bl.writeLimiter = new LeakyBucketRateLimiter(info.getRps());
++        }
++    }
++
++    public VolumeBucketKey extractVolumeBucket(OzoneManagerProtocolProtos.Type cmdType, OzoneManagerProtocolProtos.OMRequest req) {
++        switch (cmdType) {
++            // ===== READ =====
++            case LookupKey: {
++                OzoneManagerProtocolProtos.KeyArgs args =
++                        req.getLookupKeyRequest().getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case ListKeys:
++            case ListKeysLight: {
++                OzoneManagerProtocolProtos.ListKeysRequest lr =
++                        req.getListKeysRequest();
++                return new VolumeBucketKey(lr.getVolumeName(), lr.getBucketName());
++            }
++            case GetFileStatus: {
++                OzoneManagerProtocolProtos.GetFileStatusRequest gfs =
++                        req.getGetFileStatusRequest();
++                return new VolumeBucketKey(gfs.getKeyArgs().getVolumeName(), gfs.getKeyArgs().getBucketName());
++            }
++            case LookupFile: {
++                OzoneManagerProtocolProtos.LookupFileRequest lf =
++                        req.getLookupFileRequest();
++                return new VolumeBucketKey(lf.getKeyArgs().getVolumeName(), lf.getKeyArgs().getBucketName());
++            }
++            case ListStatus:
++            case ListStatusLight: {
++                OzoneManagerProtocolProtos.ListStatusRequest ls =
++                        req.getListStatusRequest();
++                return new VolumeBucketKey(ls.getKeyArgs().getVolumeName(), ls.getKeyArgs().getBucketName());
++            }
++            case GetKeyInfo: {
++                OzoneManagerProtocolProtos.GetKeyInfoRequest gk =
++                        req.getGetKeyInfoRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = gk.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case InfoBucket: {
++                OzoneManagerProtocolProtos.InfoBucketRequest ib =
++                        req.getInfoBucketRequest();
++                return new VolumeBucketKey(ib.getVolumeName(), ib.getBucketName());
++            }
++            case ListTrash: {
++                OzoneManagerProtocolProtos.ListTrashRequest lt =
++                        req.getListTrashRequest();
++                return new VolumeBucketKey(lt.getVolumeName(), lt.getBucketName());
++            }
++            case ListMultiPartUploadParts: {
++                OzoneManagerProtocolProtos.MultipartUploadListPartsRequest mp =
++                        req.getListMultipartUploadPartsRequest();
++                return new VolumeBucketKey(mp.getVolume(), mp.getBucket());
++            }
++            case ListMultipartUploads: {
++                OzoneManagerProtocolProtos.ListMultipartUploadsRequest lm =
++                        req.getListMultipartUploadsRequest();
++                return new VolumeBucketKey(lm.getVolume(), lm.getBucket());
++            }
++            case ListSnapshot: {
++                OzoneManagerProtocolProtos.ListSnapshotRequest lsnap =
++                        req.getListSnapshotRequest();
++                return new VolumeBucketKey(lsnap.getVolumeName(),
++                        lsnap.getBucketName());
++            }
++            case SnapshotDiff: {
++                OzoneManagerProtocolProtos.SnapshotDiffRequest sd =
++                        req.getSnapshotDiffRequest();
++                return new VolumeBucketKey(sd.getVolumeName(), sd.getBucketName());
++            }
++            case CancelSnapshotDiff: {
++                OzoneManagerProtocolProtos.CancelSnapshotDiffRequest csd =
++                        req.getCancelSnapshotDiffRequest();
++                return new VolumeBucketKey(csd.getVolumeName(), csd.getBucketName());
++            }
++            case ListSnapshotDiffJobs: {
++                OzoneManagerProtocolProtos.ListSnapshotDiffJobRequest lj =
++                        req.getListSnapshotDiffJobRequest();
++                return new VolumeBucketKey(lj.getVolumeName(), lj.getBucketName());
++            }
++            case GetSnapshotInfo: {
++                OzoneManagerProtocolProtos.SnapshotInfoRequest si =
++                        req.getSnapshotInfoRequest();
++                return new VolumeBucketKey(si.getVolumeName(), si.getBucketName());
++            }
++            case GetContentSummary: {
++                OzoneManagerProtocolProtos.GetContentSummaryRequest cs =
++                        req.getGetContentSummaryRequest();
++                return new VolumeBucketKey(cs.getKeyArgs().getVolumeName(), cs.getKeyArgs().getBucketName());
++            }
++
++            case CreateKey: {
++                OzoneManagerProtocolProtos.CreateKeyRequest ck =
++                        req.getCreateKeyRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = ck.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case DeleteKey: {
++                OzoneManagerProtocolProtos.DeleteKeyRequest dk =
++                        req.getDeleteKeyRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = dk.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case CreateFile: {
++                OzoneManagerProtocolProtos.CreateFileRequest cf =
++                        req.getCreateFileRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = cf.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case DeleteKeys: {
++                OzoneManagerProtocolProtos.DeleteKeysRequest dk =
++                        req.getDeleteKeysRequest();
++                return new VolumeBucketKey(dk.getDeleteKeys().getVolumeName(), dk.getDeleteKeys().getBucketName());
++            }
++            case CreateBucket: {
++                OzoneManagerProtocolProtos.CreateBucketRequest cb =
++                        req.getCreateBucketRequest();
++                return new VolumeBucketKey(cb.getBucketInfo().getVolumeName(),
++                        cb.getBucketInfo().getBucketName());
++            }
++            case DeleteBucket: {
++                OzoneManagerProtocolProtos.DeleteBucketRequest db =
++                        req.getDeleteBucketRequest();
++                return new VolumeBucketKey(db.getVolumeName(), db.getBucketName());
++            }
++            case SetBucketProperty: {
++                OzoneManagerProtocolProtos.SetBucketPropertyRequest sb =
++                        req.getSetBucketPropertyRequest();
++                return new VolumeBucketKey(sb.getBucketArgs().getVolumeName(),
++                        sb.getBucketArgs().getBucketName());
++            }
++            //case PurgeKeys:
++            case CreateSnapshot: {
++                OzoneManagerProtocolProtos.CreateSnapshotRequest cs =
++                        req.getCreateSnapshotRequest();
++                return new VolumeBucketKey(cs.getVolumeName(), cs.getBucketName());
++            }
++            case DeleteSnapshot: {
++                OzoneManagerProtocolProtos.DeleteSnapshotRequest ds =
++                        req.getDeleteSnapshotRequest();
++                return new VolumeBucketKey(ds.getVolumeName(), ds.getBucketName());
++            }
++            case RenameSnapshot: {
++                OzoneManagerProtocolProtos.RenameSnapshotRequest rs =
++                        req.getRenameSnapshotRequest();
++                return new VolumeBucketKey(rs.getVolumeName(), rs.getBucketName());
++            }
++            case RecoverLease: {
++                OzoneManagerProtocolProtos.RecoverLeaseRequest rl =
++                        req.getRecoverLeaseRequest();
++                return new VolumeBucketKey(rl.getVolumeName(), rl.getBucketName());
++            }
++            case CreateDirectory: {
++                OzoneManagerProtocolProtos.CreateDirectoryRequest cd =
++                        req.getCreateDirectoryRequest();
++                return new VolumeBucketKey(cd.getKeyArgs().getVolumeName(), cd.getKeyArgs().getBucketName());
++            }
++            case AllocateBlock: {
++                OzoneManagerProtocolProtos.AllocateBlockRequest ab =
++                        req.getAllocateBlockRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = ab.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case CommitKey: {
++                OzoneManagerProtocolProtos.CommitKeyRequest ck =
++                        req.getCommitKeyRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = ck.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case RenameKey: {
++                OzoneManagerProtocolProtos.RenameKeyRequest rk =
++                        req.getRenameKeyRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = rk.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case RenameKeys: {
++                OzoneManagerProtocolProtos.RenameKeysRequest rk =
++                        req.getRenameKeysRequest();
++                return new VolumeBucketKey(rk.getRenameKeysArgs().getVolumeName(),
++                        rk.getRenameKeysArgs().getBucketName());
++            }
++            case InitiateMultiPartUpload: {
++                OzoneManagerProtocolProtos.KeyArgs args = req.getInitiateMultiPartUploadRequest().getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case CommitMultiPartUpload:
++            case AbortMultiPartUpload:
++            case CompleteMultiPartUpload: {
++                OzoneManagerProtocolProtos.KeyArgs args = req.getCommitMultiPartUploadRequest().getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++            case SetTimes: {
++                OzoneManagerProtocolProtos.SetTimesRequest st =
++                        req.getSetTimesRequest();
++                OzoneManagerProtocolProtos.KeyArgs args = st.getKeyArgs();
++                return new VolumeBucketKey(args.getVolumeName(), args.getBucketName());
++            }
++
++            default:
++                return null;
++        }
++    }
++
++    static final class VolumeBucketKey {
++        final String volume;
++        final String bucket;
++        VolumeBucketKey(String volume, String bucket) {
++            this.volume = volume;
++            this.bucket = bucket;
++        }
++    }
++
++    private static final class BucketLimiters {
++        volatile RateLimiter readLimiter;
++        volatile RateLimiter writeLimiter;
++    }
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OmMetadataManagerImpl.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OmMetadataManagerImpl.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OmMetadataManagerImpl.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OmMetadataManagerImpl.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/OmMetadataManagerImpl.java	(date 1764321605525)
+@@ -63,24 +63,7 @@
+ import org.apache.hadoop.ozone.om.codec.TokenIdentifierCodec;
+ import org.apache.hadoop.ozone.om.exceptions.OMException;
+ import org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
+-import org.apache.hadoop.ozone.om.helpers.ListKeysResult;
+-import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBAccessIdInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBUserPrincipalInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
+-import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
+-import org.apache.hadoop.ozone.om.helpers.OmPrefixInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBTenantState;
+-import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
+-import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
+-import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.S3SecretValue;
+-import org.apache.hadoop.ozone.om.helpers.SnapshotInfo;
+-import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+-import org.apache.hadoop.ozone.om.helpers.WithMetadata;
++import org.apache.hadoop.ozone.om.helpers.*;
+ import org.apache.hadoop.ozone.om.lock.IOzoneManagerLock;
+ import org.apache.hadoop.ozone.om.lock.OmReadOnlyLock;
+ import org.apache.hadoop.ozone.om.lock.OzoneManagerLock;
+@@ -89,6 +72,7 @@
+ import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
+ import org.apache.hadoop.ozone.om.snapshot.ReferenceCounted;
+ import org.apache.hadoop.ozone.om.snapshot.SnapshotUtils;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ExpiredMultipartUploadInfo;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ExpiredMultipartUploadsBucket;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyArgs;
+@@ -238,6 +222,8 @@
+       "compactionLogTable";
+   public static final String MULTI_RAFT_INFO_TABLE =
+       "multiRaftInfoTable";
++  public static final String RATE_LIMITER_INFO_TABLE =
++      "rateLimiterInfoTable";
+   static final String[] ALL_TABLES = new String[] {
+       USER_TABLE,
+       VOLUME_TABLE,
+@@ -261,7 +247,8 @@
+       SNAPSHOT_INFO_TABLE,
+       SNAPSHOT_RENAMED_TABLE,
+       COMPACTION_LOG_TABLE,
+-      MULTI_RAFT_INFO_TABLE
++      MULTI_RAFT_INFO_TABLE,
++      RATE_LIMITER_INFO_TABLE
+   };
+ 
+   private DBStore store;
+@@ -297,6 +284,7 @@
+   private boolean ignorePipelineinKey;
+   private Table deletedDirTable;
+   private Table<String, Long> multiRaftInfoTable;
++  private Table<String, RateLimiterInfo> rateLimiterInfoTable;
+ 
+   // Table-level locks that protects table read/write access. Note:
+   // Don't use this lock for tables other than deletedTable and deletedDirTable.
+@@ -634,6 +622,7 @@
+         .addTable(SNAPSHOT_RENAMED_TABLE)
+         .addTable(COMPACTION_LOG_TABLE)
+         .addTable(MULTI_RAFT_INFO_TABLE)
++        .addTable(RATE_LIMITER_INFO_TABLE)
+         .addCodec(OzoneTokenIdentifier.class, TokenIdentifierCodec.get())
+         .addCodec(OmKeyInfo.class, OmKeyInfo.getCodec(true))
+         .addCodec(RepeatedOmKeyInfo.class, RepeatedOmKeyInfo.getCodec(true))
+@@ -649,7 +638,8 @@
+         .addCodec(OmDBAccessIdInfo.class, OmDBAccessIdInfo.getCodec())
+         .addCodec(OmDBUserPrincipalInfo.class, OmDBUserPrincipalInfo.getCodec())
+         .addCodec(SnapshotInfo.class, SnapshotInfo.getCodec())
+-        .addCodec(CompactionLogEntry.class, CompactionLogEntry.getCodec());
++        .addCodec(CompactionLogEntry.class, CompactionLogEntry.getCodec())
++        .addCodec(RateLimiterInfo.class, RateLimiterInfo.getCodec());
+   }
+ 
+   /**
+@@ -771,6 +761,11 @@
+         String.class, Long.class);
+     checkTableStatus(multiRaftInfoTable, MULTI_RAFT_INFO_TABLE,
+         addCacheMetrics);
++
++    rateLimiterInfoTable = this.store.getTable(RATE_LIMITER_INFO_TABLE,
++         String.class, RateLimiterInfo.class);
++    checkTableStatus(rateLimiterInfoTable, RATE_LIMITER_INFO_TABLE,
++            addCacheMetrics);
+   }
+ 
+   /**
+@@ -1959,6 +1954,11 @@
+     return multiRaftInfoTable;
+   }
+ 
++  @Override
++  public Table<String, RateLimiterInfo> getRateLimiterInfoTable() {
++    return rateLimiterInfoTable;
++  }
++
+   /**
+    * Get Snapshot Chain Manager.
+    *
+Index: hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/helpers/RateLimiterInfo.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/helpers/RateLimiterInfo.java b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/helpers/RateLimiterInfo.java
+new file mode 100644
+--- /dev/null	(date 1764107750176)
++++ b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/helpers/RateLimiterInfo.java	(date 1764107750176)
+@@ -0,0 +1,153 @@
++package org.apache.hadoop.ozone.om.helpers;
++
++
++import java.util.Objects;
++
++import io.netty.handler.codec.CodecException;
++import org.apache.hadoop.hdds.utils.db.Codec;
++import org.apache.hadoop.hdds.utils.db.DelegatedCodec;
++import org.apache.hadoop.hdds.utils.db.Proto2Codec;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiter;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++
++public final class RateLimiterInfo {
++
++  private static final Codec<RateLimiterInfo> CODEC = new DelegatedCodec<>(
++          Proto2Codec.get(RateLimiter.getDefaultInstance()),
++          RateLimiterInfo::getFromProtobuf,
++          RateLimiterInfo::getProtobuf,
++          DelegatedCodec.CopyType.SHALLOW);
++
++  public static Codec<RateLimiterInfo> getCodec() {
++    return CODEC;
++  }
++
++  private final String volumeName;
++  private final String bucketName;
++  private final int rps;
++  private final RateLimiterType type;
++
++  private RateLimiterInfo(Builder b) {
++    this.volumeName = b.volumeName;
++    this.bucketName = b.bucketName;
++    this.rps = b.rps;
++    this.type = b.type;
++  }
++
++  public String getVolumeName() {
++    return volumeName;
++  }
++
++  public String getBucketName() {
++    return bucketName;
++  }
++
++  public int getRps() {
++    return rps;
++  }
++
++  public RateLimiterType getType() {
++    return type;
++  }
++
++  public static RateLimiterInfo getFromProtobuf(
++          RateLimiter proto) throws CodecException {
++    return new Builder()
++            .setVolumeName(proto.getVolumeName())
++            .setBucketName(proto.getBucketName())
++            .setRps(proto.getRps())
++            .setType(proto.getType())
++            .build();
++  }
++
++  public RateLimiter getProtobuf() {
++    return RateLimiter.newBuilder()
++            .setVolumeName(volumeName)
++            .setBucketName(bucketName)
++            .setRps(rps)
++            .setType(type)
++            .build();
++  }
++
++  public RateLimiter toProtobuf() {
++    return RateLimiter.newBuilder()
++            .setVolumeName(volumeName)
++            .setBucketName(bucketName)
++            .setRps(rps)
++            .setType(type)
++            .build();
++  }
++
++  public static Builder newBuilder() {
++    return new Builder();
++  }
++
++  public static final class Builder {
++    private String volumeName;
++    private String bucketName;
++    private int rps;
++    private RateLimiterType type;
++
++    public Builder setVolumeName(String volumeName) {
++      this.volumeName = volumeName;
++      return this;
++    }
++
++    public Builder setBucketName(String bucketName) {
++      this.bucketName = bucketName;
++      return this;
++    }
++
++    public Builder setRps(int rps) {
++      this.rps = rps;
++      return this;
++    }
++
++    public Builder setType(RateLimiterType type) {
++      this.type = type;
++      return this;
++    }
++
++    public RateLimiterInfo build() {
++      if (volumeName == null || volumeName.isEmpty()) {
++          throw new IllegalArgumentException("volumeName must not be empty");
++      }
++      if (bucketName == null || bucketName.isEmpty()) {
++          throw new IllegalArgumentException("bucketName must not be empty");
++      }
++      if (rps <= 0) {
++          throw new IllegalArgumentException("rps must be positive");
++      }
++      if (type == null) {
++          throw new IllegalArgumentException("type must not be null");
++      }
++      return new RateLimiterInfo(this);
++    }
++  }
++
++  @Override
++  public boolean equals(Object o) {
++    if (this == o) return true;
++    if (!(o instanceof RateLimiterInfo)) return false;
++    RateLimiterInfo that = (RateLimiterInfo) o;
++    return rps == that.rps
++            && Objects.equals(volumeName, that.volumeName)
++            && Objects.equals(bucketName, that.bucketName)
++            && type == that.type;
++  }
++
++  @Override
++  public int hashCode() {
++    return Objects.hash(volumeName, bucketName, rps, type);
++  }
++
++  @Override
++  public String toString() {
++    return "OmRateLimiterInfo{" +
++            "volumeName='" + volumeName + '\'' +
++            ", bucketName='" + bucketName + '\'' +
++            ", rps=" + rps +
++            ", type=" + type +
++            '}';
++  }
++}
+Index: hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/package-info.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/package-info.java b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/package-info.java
+new file mode 100644
+--- /dev/null	(date 1763979478926)
++++ b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/package-info.java	(date 1763979478926)
+@@ -0,0 +1,24 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ * <p>
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * <p>
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ * <p>
++ */
++
++/**
++ * Rate Limiter related Admin tools.
++ */
++
++package org.apache.hadoop.ozone.admin.ratelimiter;
+Index: hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCommands.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCommands.java b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCommands.java
+new file mode 100644
+--- /dev/null	(date 1763994080831)
++++ b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCommands.java	(date 1763994080831)
+@@ -0,0 +1,48 @@
++package org.apache.hadoop.ozone.admin.ratelimiter;
++
++import org.apache.hadoop.hdds.cli.GenericCli;
++import org.apache.hadoop.hdds.cli.HddsVersionProvider;
++import org.apache.hadoop.hdds.cli.OzoneAdmin;
++import org.apache.hadoop.hdds.cli.SubcommandWithParent;
++import org.kohsuke.MetaInfServices;
++import picocli.CommandLine;
++
++import java.util.concurrent.Callable;
++
++
++/**
++ * Subcommand for admin operations related to Rate Limiter.
++ */
++@CommandLine.Command(
++        name = "ratelimiter",
++        description = "Rate limiter specific admin operations",
++        mixinStandardHelpOptions = true,
++        versionProvider = HddsVersionProvider.class,
++        subcommands = {
++            RateLimiterCreateSubCommand.class,
++            RateLimiterDeleteSubCommand.class,
++            RateLimiterListSubCommand.class
++        })
++@MetaInfServices(SubcommandWithParent.class)
++public class RateLimiterCommands implements Callable<Void>, SubcommandWithParent {
++    @CommandLine.ParentCommand
++    private OzoneAdmin parent;
++
++    @CommandLine.Spec
++    private CommandLine.Model.CommandSpec spec;
++
++    public OzoneAdmin getParent() {
++        return parent;
++    }
++
++    @Override
++    public Void call() throws Exception {
++        GenericCli.missingSubcommand(spec);
++        return null;
++    }
++
++    @Override
++    public Class<?> getParentType() {
++        return OzoneAdmin.class;
++    }
++}
+Index: hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/AbstractRateLimiterSubCommand.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/AbstractRateLimiterSubCommand.java b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/AbstractRateLimiterSubCommand.java
+new file mode 100644
+--- /dev/null	(date 1763979478925)
++++ b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/AbstractRateLimiterSubCommand.java	(date 1763979478925)
+@@ -0,0 +1,48 @@
++package org.apache.hadoop.ozone.admin.ratelimiter;
++
++import com.google.common.annotations.VisibleForTesting;
++import org.apache.hadoop.hdds.conf.OzoneConfiguration;
++import org.apache.hadoop.ozone.client.rpc.RpcClient;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++import picocli.CommandLine;
++
++import java.io.IOException;
++import java.util.concurrent.Callable;
++
++/**
++ * An abstract class for RateLimiterSubCommand.
++ */
++public abstract class AbstractRateLimiterSubCommand implements Callable<Void> {
++    @CommandLine.ParentCommand
++    private RateLimiterCommands parent;
++
++    @Override
++    public abstract Void call() throws Exception;
++
++    protected RateLimiterType parseRateLimiterType(String rateLimiterType) {
++        if (rateLimiterType.equalsIgnoreCase("read")) {
++            return RateLimiterType.READ;
++        } else if (rateLimiterType.equalsIgnoreCase("write")) {
++            return RateLimiterType.WRITE;
++        } else {
++            return null;
++        }
++    }
++
++    protected RpcClient newRpcClient(OzoneConfiguration conf, String omServiceId) throws IOException {
++        return new RpcClient(conf, omServiceId);
++    }
++
++    protected void printError(String error) {
++        System.err.println(error);
++    }
++
++    protected RateLimiterCommands getParent() {
++        return parent;
++    }
++
++    @VisibleForTesting
++    protected void setParent(RateLimiterCommands parent) {
++        this.parent = parent;
++    }
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/codec/OMDBDefinition.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/codec/OMDBDefinition.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/codec/OMDBDefinition.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/codec/OMDBDefinition.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/codec/OMDBDefinition.java	(date 1764107426809)
+@@ -24,20 +24,10 @@
+ import org.apache.hadoop.hdds.utils.db.Proto2Codec;
+ import org.apache.hadoop.hdds.utils.db.StringCodec;
+ import org.apache.hadoop.ozone.OzoneConsts;
++import org.apache.hadoop.ozone.client.OzoneKey;
+ import org.apache.hadoop.ozone.om.OMConfigKeys;
+ import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
+-import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBAccessIdInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBUserPrincipalInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBTenantState;
+-import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
+-import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmPrefixInfo;
+-import org.apache.hadoop.ozone.om.helpers.S3SecretValue;
+-import org.apache.hadoop.ozone.om.helpers.SnapshotInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
++import org.apache.hadoop.ozone.om.helpers.*;
+ 
+ import org.apache.hadoop.hdds.utils.TransactionInfo;
+ import org.apache.hadoop.ozone.om.service.SnapshotDeletingService;
+@@ -200,6 +190,15 @@
+                   Long.class,
+                   LongCodec.get());
+ 
++  public static final DBColumnFamilyDefinition<String, RateLimiterInfo>
++          RATE_LIMITER_INFO_TABLE =
++          new DBColumnFamilyDefinition<>(
++                  OmMetadataManagerImpl.RATE_LIMITER_INFO_TABLE,
++                  String.class,
++                  StringCodec.get(),
++                  RateLimiterInfo.class,
++                  RateLimiterInfo.getCodec());
++
+   // Tables for multi-tenancy
+ 
+   public static final DBColumnFamilyDefinition<String, OmDBAccessIdInfo>
+@@ -292,7 +291,9 @@
+           TRANSACTION_INFO_TABLE,
+           USER_TABLE,
+           VOLUME_TABLE,
+-          MULTI_RAFT_INFO_TABLE);
++          MULTI_RAFT_INFO_TABLE,
++          RATE_LIMITER_INFO_TABLE
++          );
+ 
+   public OMDBDefinition() {
+     super(COLUMN_FAMILIES);
+Index: hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterListSubCommand.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterListSubCommand.java b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterListSubCommand.java
+new file mode 100644
+--- /dev/null	(date 1763979478932)
++++ b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterListSubCommand.java	(date 1763979478932)
+@@ -0,0 +1,50 @@
++package org.apache.hadoop.ozone.admin.ratelimiter;
++
++import org.apache.hadoop.hdds.cli.HddsVersionProvider;
++import org.apache.hadoop.ozone.client.rpc.RpcClient;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++import picocli.CommandLine;
++
++/**
++ * Rate Limiter List Subcommand.
++ */
++@CommandLine.Command(
++        name = "list",
++        description = "List all rate limiters.",
++        mixinStandardHelpOptions = true,
++        versionProvider = HddsVersionProvider.class)
++public class RateLimiterListSubCommand extends AbstractRateLimiterSubCommand {
++    @CommandLine.ParentCommand
++    private RateLimiterCommands parent;
++
++    @CommandLine.Option(
++            names = {"--volume"},
++            description = "Volume name",
++            required = false
++    )
++    private String volumeName;
++
++    @CommandLine.Option(
++            names = {"--bucket"},
++            description = "Bucket name",
++            required = false
++    )
++    private String bucketName;
++
++    @CommandLine.Option(
++            names = {"--type"},
++            description = "Rate limiter type",
++            required = false
++    )
++    private String type;
++
++    @Override
++    public Void call() throws Exception {
++        RpcClient client = new RpcClient(parent.getParent().getOzoneConf(), null);
++        RateLimiterType rateLimiterType = parseRateLimiterType(type);
++        ListRateLimiterResponse response = client.listRateLimiter(volumeName, bucketName, rateLimiterType);
++        System.out.println(response);
++        return null;
++    }
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/CreateRateLimiterResponse.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/CreateRateLimiterResponse.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/CreateRateLimiterResponse.java
+new file mode 100644
+--- /dev/null	(date 1764109050407)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/CreateRateLimiterResponse.java	(date 1764109050407)
+@@ -0,0 +1,25 @@
++package org.apache.hadoop.ozone.om.response.ratelimiter;
++
++import org.apache.hadoop.hdds.utils.db.BatchOperation;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
++import org.apache.hadoop.ozone.om.response.CleanupTableInfo;
++import org.apache.hadoop.ozone.om.response.OMClientResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
++        .OMResponse;
++
++import java.io.IOException;
++
++import static org.apache.hadoop.ozone.om.OmMetadataManagerImpl.RATE_LIMITER_INFO_TABLE;
++
++@CleanupTableInfo(cleanupTables = RATE_LIMITER_INFO_TABLE)
++public class CreateRateLimiterResponse extends OMClientResponse {
++
++    public CreateRateLimiterResponse(OMResponse omResponse) {
++        super(omResponse);
++    }
++
++    @Override
++    protected void addToDBBatch(OMMetadataManager omMetadataManager, BatchOperation batchOperation) throws IOException {
++        //NOOP
++    }
++}
+Index: hadoop-ozone/s3gateway/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/s3gateway/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java b/hadoop-ozone/s3gateway/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java
+--- a/hadoop-ozone/s3gateway/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/s3gateway/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java	(date 1763979478923)
+@@ -48,6 +48,10 @@
+ import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
+ import org.apache.hadoop.ozone.om.protocol.S3Auth;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RefreshBucketUsedBytesResponse;
+ import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
+ import org.apache.hadoop.ozone.security.acl.OzoneObj;
+@@ -730,4 +734,29 @@
+       throws IOException {
+     throw new UnsupportedOperationException("Not supported yet.");
+   }
++
++  @Override
++  public CreateRateLimiterResponse createRateLimiter(String volumeName,
++                                                     String bucketName,
++                                                     int rps,
++                                                     RateLimiterType type)
++          throws IOException {
++    throw new UnsupportedOperationException("Not supported yet.");
++  }
++
++  @Override
++  public DeleteRateLimiterResponse deleteRateLimiter(String volumeName,
++                                                     String bucketName,
++                                                     RateLimiterType type)
++          throws IOException {
++    throw new UnsupportedOperationException("Not supported yet.");
++  }
++
++  @Override
++  public ListRateLimiterResponse listRateLimiter(String volumeName,
++                                                 String bucketName,
++                                                 RateLimiterType type)
++          throws IOException {
++    throw new UnsupportedOperationException("Not supported yet.");
++  }
+ }
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/ListRateLimitersResponse.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/ListRateLimitersResponse.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/ListRateLimitersResponse.java
+new file mode 100644
+--- /dev/null	(date 1764207296610)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/ListRateLimitersResponse.java	(date 1764207296610)
+@@ -0,0 +1,23 @@
++package org.apache.hadoop.ozone.om.response.ratelimiter;
++
++import org.apache.hadoop.hdds.utils.db.BatchOperation;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
++import org.apache.hadoop.ozone.om.response.CleanupTableInfo;
++import org.apache.hadoop.ozone.om.response.OMClientResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++
++import java.io.IOException;
++
++import static org.apache.hadoop.ozone.om.OmMetadataManagerImpl.RATE_LIMITER_INFO_TABLE;
++
++@CleanupTableInfo(cleanupTables = RATE_LIMITER_INFO_TABLE)
++public class ListRateLimitersResponse extends OMClientResponse {
++    public ListRateLimitersResponse(OzoneManagerProtocolProtos.OMResponse omResponse) {
++        super(omResponse);
++    }
++
++    @Override
++    protected void addToDBBatch(OMMetadataManager omMetadataManager, BatchOperation batchOperation) throws IOException {
++        //NOOP
++    }
++}
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/DeleteRateLimiterResponse.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/DeleteRateLimiterResponse.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/DeleteRateLimiterResponse.java
+new file mode 100644
+--- /dev/null	(date 1764205313492)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/response/ratelimiter/DeleteRateLimiterResponse.java	(date 1764205313492)
+@@ -0,0 +1,23 @@
++package org.apache.hadoop.ozone.om.response.ratelimiter;
++
++import org.apache.hadoop.hdds.utils.db.BatchOperation;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
++import org.apache.hadoop.ozone.om.response.CleanupTableInfo;
++import org.apache.hadoop.ozone.om.response.OMClientResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++
++import java.io.IOException;
++
++import static org.apache.hadoop.ozone.om.OmMetadataManagerImpl.RATE_LIMITER_INFO_TABLE;
++
++@CleanupTableInfo(cleanupTables = RATE_LIMITER_INFO_TABLE)
++public class DeleteRateLimiterResponse extends OMClientResponse {
++    public DeleteRateLimiterResponse(OzoneManagerProtocolProtos.OMResponse omResponse) {
++        super(omResponse);
++    }
++
++    @Override
++    protected void addToDBBatch(OMMetadataManager omMetadataManager, BatchOperation batchOperation) throws IOException {
++        //NOOP
++    }
++}
+Index: hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterDeleteSubCommand.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterDeleteSubCommand.java b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterDeleteSubCommand.java
+new file mode 100644
+--- /dev/null	(date 1763979478931)
++++ b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterDeleteSubCommand.java	(date 1763979478931)
+@@ -0,0 +1,53 @@
++package org.apache.hadoop.ozone.admin.ratelimiter;
++
++import org.apache.hadoop.hdds.cli.HddsVersionProvider;
++import org.apache.hadoop.ozone.client.rpc.RpcClient;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++import picocli.CommandLine;
++
++/**
++ * Rate Limiter Delete Subcommand.
++ */
++@CommandLine.Command(
++        name = "delete",
++        description = "Delete a new rate limiter.",
++        mixinStandardHelpOptions = true,
++        versionProvider = HddsVersionProvider.class)
++public class RateLimiterDeleteSubCommand extends AbstractRateLimiterSubCommand {
++    @CommandLine.ParentCommand
++    private RateLimiterCommands parent;
++
++    @CommandLine.Option(
++            names = {"--volume"},
++            description = "Volume name",
++            required = true
++    )
++    private String volumeName;
++
++    @CommandLine.Option(
++            names = {"--bucket"},
++            description = "Bucket name",
++            required = true
++    )
++    private String bucketName;
++
++    @CommandLine.Option(
++            names = {"--type"},
++            description = "Rate limiter type",
++            required = true
++    )
++    private String type;
++
++    @Override
++    public Void call() throws Exception {
++        try {
++            RpcClient client = new RpcClient(parent.getParent().getOzoneConf(), null);
++            RateLimiterType rateLimiterType = parseRateLimiterType(type);
++            client.deleteRateLimiter(volumeName, bucketName, rateLimiterType);
++            System.out.println("Deleted rate limiter.");
++        } catch (Exception e) {
++            printError("Failed to delete a rate limiter.");
++        }
++        return null;
++    }
++}
+Index: hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerClientProtocol.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerClientProtocol.java b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerClientProtocol.java
+--- a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerClientProtocol.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerClientProtocol.java	(date 1763979478900)
+@@ -23,6 +23,10 @@
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateBucketRaftGroupsResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RefreshBucketUsedBytesResponse;
+ 
+ import java.io.IOException;
+@@ -56,4 +60,14 @@
+   void moveOmToSafeMode() throws IOException;
+ 
+   RefreshBucketUsedBytesResponse refreshBucketUsedBytes(String volumeName, String bucketName) throws IOException;
++
++  CreateRateLimiterResponse createRateLimiter(String volumeName, String bucketName, int rps, RateLimiterType type)
++      throws IOException;
++
++  DeleteRateLimiterResponse deleteRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++      throws IOException;
++
++  ListRateLimiterResponse listRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++      throws IOException;
++
+ }
+Index: hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerProtocolClientSideTranslatorPB.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerProtocolClientSideTranslatorPB.java b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerProtocolClientSideTranslatorPB.java
+--- a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerProtocolClientSideTranslatorPB.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/om/protocolPB/OzoneManagerProtocolClientSideTranslatorPB.java	(date 1763979478909)
+@@ -102,6 +102,8 @@
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateFileResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateKeyRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateKeyResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterRequest;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateSnapshotRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateTenantRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateVolumeRequest;
+@@ -111,6 +113,8 @@
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteKeyArgs;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteKeyRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteKeysRequest;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterRequest;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteSnapshotRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteTenantRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteTenantResponse;
+@@ -148,6 +152,8 @@
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListKeysResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListMultipartUploadsRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListMultipartUploadsResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterRequest;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListSnapshotDiffJobRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListSnapshotRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListStatusLightResponse;
+@@ -185,6 +191,7 @@
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.PrintCompactionLogDagRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RangerBGSyncRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RangerBGSyncResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RecoverLeaseRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RecoverLeaseResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RecoverTrashRequest;
+@@ -2652,6 +2659,49 @@
+     return handleError(submitRequest(omRequest)).getRefreshBucketUsedBytesResponse();
+   }
+ 
++  @Override
++  public CreateRateLimiterResponse createRateLimiter(String volumeName, String bucketName, int rps, RateLimiterType type)
++      throws IOException {
++      CreateRateLimiterRequest createRateLimiterRequest = CreateRateLimiterRequest.newBuilder()
++            .setVolumeName(volumeName)
++            .setBucketName(bucketName)
++            .setRps(rps)
++            .setType(type)
++            .build();
++    OMRequest omRequest = createOMRequest(Type.CreateRateLimiter)
++            .setCreateRateLimiterRequest(createRateLimiterRequest)
++            .build();
++    return handleError(submitRequest(omRequest)).getCreateRateLimiterResponse();
++  }
++
++  @Override
++  public DeleteRateLimiterResponse deleteRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++    throws IOException {
++    DeleteRateLimiterRequest deleteRateLimiterRequest = DeleteRateLimiterRequest.newBuilder()
++            .setVolumeName(volumeName)
++            .setBucketName(bucketName)
++            .setType(type)
++            .build();
++    OMRequest omRequest = createOMRequest(Type.DeleteRateLimiter)
++            .setDeleteRateLimiterRequest(deleteRateLimiterRequest)
++            .build();
++    return handleError(submitRequest(omRequest)).getDeleteRateLimiterResponse();
++  }
++
++  @Override
++  public ListRateLimiterResponse listRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++    throws IOException {
++    ListRateLimiterRequest listRateLimiterRequest = ListRateLimiterRequest.newBuilder()
++            .setVolumeName(volumeName)
++            .setBucketName(bucketName)
++            .setType(type)
++            .build();
++    OMRequest omRequest = createOMRequest(Type.ListRateLimiter)
++            .setListRateLimiterRequest(listRateLimiterRequest)
++            .build();
++    return handleError(submitRequest(omRequest)).getListRateLimiterResponse();
++  }
++
+   private SafeMode toProtoBuf(SafeModeAction action) {
+     switch (action) {
+     case ENTER:
+Index: hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java
+--- a/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java	(date 1763979478913)
+@@ -329,6 +329,9 @@
+     case AbortExpiredMultiPartUploads:
+     case SetSnapshotProperty:
+     case RefreshBucketUsedBytes:
++    case CreateRateLimiter:
++    case DeleteRateLimiter:
++    case ListRateLimiter:
+     case UnknownCommand:
+       return false;
+     case EchoRPC:
+Index: hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCreateSubCommand.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCreateSubCommand.java b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCreateSubCommand.java
+new file mode 100644
+--- /dev/null	(date 1763979478929)
++++ b/hadoop-ozone/tools/src/main/java/org/apache/hadoop/ozone/admin/ratelimiter/RateLimiterCreateSubCommand.java	(date 1763979478929)
+@@ -0,0 +1,84 @@
++package org.apache.hadoop.ozone.admin.ratelimiter;
++
++import com.google.common.annotations.VisibleForTesting;
++import org.apache.hadoop.hdds.cli.HddsVersionProvider;
++import org.apache.hadoop.ozone.client.rpc.RpcClient;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
++import picocli.CommandLine;
++
++/**
++ * Rate Limiter Create Subcommand.
++ */
++@CommandLine.Command(
++        name = "create",
++        description = "Create a new rate limiter.",
++        mixinStandardHelpOptions = true,
++        versionProvider = HddsVersionProvider.class)
++public class RateLimiterCreateSubCommand extends AbstractRateLimiterSubCommand {
++    @CommandLine.ParentCommand
++    private RateLimiterCommands parent;
++
++    @CommandLine.Option(
++            names = {"--volume"},
++            description = "Volume name",
++            required = true
++    )
++    private String volumeName;
++
++    @CommandLine.Option(
++            names = {"--bucket"},
++            description = "Bucket name",
++            required = true
++    )
++    private String bucketName;
++
++    @CommandLine.Option(
++            names = {"--rps"},
++            description = "RPS",
++            required = true
++    )
++    private int rps;
++
++    @CommandLine.Option(
++            names = {"--type"},
++            description = "Rate limiter type",
++            required = true
++    )
++    private String type;
++
++    @Override
++    public Void call() throws Exception {
++        try {
++            RpcClient client = newRpcClient(parent.getParent().getOzoneConf(), null);
++            RateLimiterType rateLimiterType = parseRateLimiterType(type);
++            if (rps <= 0){
++                printError("RPS must be positive.");
++                return null;
++            }
++            client.createRateLimiter(volumeName, bucketName, rps, rateLimiterType);
++        } catch (Exception e) {
++            printError("Failed to create a rate limiter.");
++        }
++        return null;
++    }
++
++    @VisibleForTesting
++    public void setVolumeName(String volumeName) {
++        this.volumeName = volumeName;
++    }
++
++    @VisibleForTesting
++    public void setBucketName(String bucketName) {
++        this.bucketName = bucketName;
++    }
++
++    @VisibleForTesting
++    public void setRps(int rps) {
++        this.rps = rps;
++    }
++
++    @VisibleForTesting
++    public void setType(String type) {
++        this.type = type;
++    }
++}
+Index: hadoop-ozone/tools/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/tools/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java b/hadoop-ozone/tools/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java
+--- a/hadoop-ozone/tools/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/tools/src/test/java/org/apache/hadoop/ozone/client/ClientProtocolStub.java	(date 1763979478936)
+@@ -57,8 +57,12 @@
+ import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
+ import org.apache.hadoop.ozone.om.protocol.S3Auth;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RefreshBucketUsedBytesResponse;
+ import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
+ import org.apache.hadoop.ozone.security.acl.OzoneObj;
+@@ -782,4 +786,26 @@
+       throws IOException {
+     throw new UnsupportedOperationException("Not supported yet.");
+   }
++
++  @Override
++  public CreateRateLimiterResponse createRateLimiter(String volumeName,
++                                                     String bucketName,
++                                                     int rps,
++                                                     RateLimiterType type)
++          throws IOException {
++    throw new UnsupportedOperationException("Not supported yet.");
++  }
++
++  @Override
++  public DeleteRateLimiterResponse deleteRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++          throws IOException {
++    throw new UnsupportedOperationException("Not supported yet.");
++  }
++
++  @Override
++  public ListRateLimiterResponse listRateLimiter(String volumeName,
++                                                 String bucketName,
++                                                 RateLimiterType type) throws IOException {
++    throw new UnsupportedOperationException("Not supported yet.");
++  }
+ }
+Index: hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/rpc/RpcClient.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/rpc/RpcClient.java b/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/rpc/RpcClient.java
+--- a/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/rpc/RpcClient.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/rpc/RpcClient.java	(date 1763981274131)
+@@ -135,9 +135,13 @@
+ import org.apache.hadoop.ozone.om.protocolPB.OmTransportFactory;
+ import org.apache.hadoop.ozone.om.protocolPB.OzoneManagerClientProtocol;
+ import org.apache.hadoop.ozone.om.protocolPB.OzoneManagerProtocolClientSideTranslatorPB;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRoleInfo;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RefreshBucketUsedBytesResponse;
+ import org.apache.hadoop.ozone.security.GDPRSymmetricKey;
+ import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
+@@ -2625,6 +2629,25 @@
+     return ozoneManagerClient.refreshBucketUsedBytes(volumeName, bucketName);
+   }
+ 
++  @Override
++  public CreateRateLimiterResponse createRateLimiter(String volumeName,
++                                                     String bucketName, int rps,
++                                                     RateLimiterType type) throws IOException {
++      return ozoneManagerClient.createRateLimiter(volumeName, bucketName, rps, type);
++  }
++
++  @Override
++  public DeleteRateLimiterResponse deleteRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++      throws IOException {
++      return ozoneManagerClient.deleteRateLimiter(volumeName, bucketName, type);
++  }
++
++  @Override
++  public ListRateLimiterResponse listRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++       throws IOException {
++    return ozoneManagerClient.listRateLimiter(volumeName, bucketName, type);
++  }
++
+   private static ExecutorService createThreadPoolExecutor(
+        int corePoolSize, int maximumPoolSize, String threadNameFormat) {
+     return new ThreadPoolExecutor(corePoolSize, maximumPoolSize,
+Index: hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/protocol/ClientProtocol.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/protocol/ClientProtocol.java b/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/protocol/ClientProtocol.java
+--- a/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/protocol/ClientProtocol.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/client/src/main/java/org/apache/hadoop/ozone/client/protocol/ClientProtocol.java	(date 1763979478890)
+@@ -64,9 +64,13 @@
+ import org.apache.hadoop.ozone.om.helpers.TenantUserList;
+ import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
+ import org.apache.hadoop.ozone.om.protocol.S3Auth;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.CreateRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.DeleteRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateRequest;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.GetRaftGroupHealthStateResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ListRateLimiterResponse;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRoleInfo;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RefreshBucketUsedBytesResponse;
+ import org.apache.hadoop.ozone.security.OzoneTokenIdentifier;
+ import org.apache.hadoop.ozone.security.acl.OzoneObj;
+@@ -1207,4 +1211,13 @@
+   void moveOmToSafeMode() throws IOException;
+ 
+   RefreshBucketUsedBytesResponse refreshBucketUsedBytes(String volumeName, String bucketName) throws IOException;
++
++  CreateRateLimiterResponse createRateLimiter(String volumeName, String bucketName, int rps, RateLimiterType type)
++      throws IOException;
++
++  DeleteRateLimiterResponse deleteRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++      throws IOException;
++
++  ListRateLimiterResponse listRateLimiter(String volumeName, String bucketName, RateLimiterType type)
++      throws IOException;
+ }
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/audit/OMAction.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/audit/OMAction.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/audit/OMAction.java
+--- a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/audit/OMAction.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/audit/OMAction.java	(date 1764209072005)
+@@ -44,6 +44,8 @@
+   UPDATE_KEY,
+   PURGE_KEYS,
+   DELETE_KEYS,
++  CREATE_RATELIMITER,
++  DELETE_RATELIMITER,
+ 
+   // READ Actions
+   CHECK_VOLUME_ACCESS,
+@@ -65,6 +67,7 @@
+   CANCEL_DELEGATION_TOKEN,
+   GET_SERVICE_LIST,
+   TRANSFER_LEADERSHIP,
++  LIST_RATELIMITERS,
+ 
+   //ACL Actions
+   ADD_ACL,
+Index: hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/CreateRateLimiterRequest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/CreateRateLimiterRequest.java b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/CreateRateLimiterRequest.java
+new file mode 100644
+--- /dev/null	(date 1764281742538)
++++ b/hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/ratelimiter/CreateRateLimiterRequest.java	(date 1764281742538)
+@@ -0,0 +1,103 @@
++package org.apache.hadoop.ozone.om.request.ratelimiter;
++
++import org.apache.hadoop.hdds.utils.db.Table;
++import org.apache.hadoop.ozone.audit.AuditLogger;
++import org.apache.hadoop.ozone.audit.OMAction;
++import org.apache.hadoop.ozone.om.OMMetadataManager;
++import org.apache.hadoop.ozone.om.OzoneManager;
++import org.apache.hadoop.ozone.om.helpers.RateLimiterInfo;
++import org.apache.hadoop.ozone.om.request.OMClientRequest;
++import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
++import org.apache.hadoop.ozone.om.response.OMClientResponse;
++import org.apache.hadoop.ozone.om.response.ratelimiter.CreateRateLimiterResponse;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
++import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
++
++import java.io.IOException;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++public class CreateRateLimiterRequest extends OMClientRequest {
++
++  public static final Logger LOG = LoggerFactory.getLogger(CreateRateLimiterRequest.class);
++
++  public CreateRateLimiterRequest(OMRequest omRequest) {
++    super(omRequest);
++  }
++
++  @Override
++  public OMClientResponse validateAndUpdateCache(OzoneManager ozoneManager, long trxnLogIndex) {
++      OMRequest omRequest = getOmRequest();
++      OzoneManagerProtocolProtos.CreateRateLimiterRequest createRateLimiterResponse = getOmRequest().getCreateRateLimiterRequest();
++      String volumeName = createRateLimiterResponse.getVolumeName();
++      String bucketName = createRateLimiterResponse.getBucketName();
++      int rps = createRateLimiterResponse.getRps();
++      OzoneManagerProtocolProtos.RateLimiterType type = createRateLimiterResponse.getType();
++      OMMetadataManager metadataManager = ozoneManager.getMetadataManager();
++      OzoneManagerProtocolProtos.OMResponse.Builder omResponse =
++              OmResponseUtil.getOMResponseBuilder(omRequest);
++      boolean bucketLockAcquired = false;
++      RateLimiterInfo rateLimiterInfo = null;
++      Exception exception = null;
++      OzoneManagerProtocolProtos.Status status = OzoneManagerProtocolProtos.Status.OK;
++      AuditLogger auditLogger = ozoneManager.getAuditLogger();
++      OzoneManagerProtocolProtos.UserInfo userInfo = getOmRequest().getUserInfo();
++      String errorMsg = null;
++
++      try {
++          metadataManager.getLock().acquireWriteLock(
++                  BUCKET_LOCK, volumeName, bucketName);
++          bucketLockAcquired = true;
++          Table<String, RateLimiterInfo> rateLimiterTable =
++                  metadataManager.getRateLimiterInfoTable();
++          String key = volumeName + ":" + bucketName;
++          rateLimiterInfo = RateLimiterInfo.newBuilder()
++                  .setVolumeName(volumeName)
++                  .setBucketName(bucketName)
++                  .setRps(rps)
++                  .setType(type)
++                  .build();
++
++          rateLimiterTable.put(key, rateLimiterInfo);
++          ozoneManager.getRateLimiterManager().createOrUpdate(rateLimiterInfo);
++          LOG.info("Created rate limiter: key={}, rps={}, type={}",
++                  key, rps, type);
++      } catch (IOException e) {
++          exception = e;
++          status = OzoneManagerProtocolProtos.Status.INTERNAL_ERROR;
++          errorMsg = "Failed to create rate limiter for volume=" + volumeName
++                  + ", bucket=" + bucketName + ": " + e.getMessage();
++          LOG.error(errorMsg, e);
++      } finally {
++          if (bucketLockAcquired) {
++              metadataManager.getLock().releaseWriteLock(
++                      BUCKET_LOCK, volumeName, bucketName);
++          }
++      }
++      OzoneManagerProtocolProtos.CreateRateLimiterResponse.Builder createRespBuilder =
++              OzoneManagerProtocolProtos.CreateRateLimiterResponse.newBuilder();
++      if (status == OzoneManagerProtocolProtos.Status.OK) {
++          createRespBuilder.setRateLimiter(rateLimiterInfo.toProtobuf());
++      }
++      omResponse.setStatus(status)
++              .setCreateRateLimiterResponse(createRespBuilder.build());
++      if (errorMsg != null) {
++          omResponse.setMessage(errorMsg);
++      }
++
++      Map<String, String> auditMap = new LinkedHashMap<>();
++      auditMap.put("volume", volumeName);
++      auditMap.put("bucket", bucketName);
++      auditMap.put("rps", String.valueOf(rps));
++      auditMap.put("type", type.name());
++
++      auditLog(auditLogger, buildAuditMessage(OMAction.CREATE_RATELIMITER,
++              auditMap, exception, userInfo));
++
++      return new CreateRateLimiterResponse(omResponse.build());
++  }
++}
+Index: hadoop-ozone/interface-storage/src/main/java/org/apache/hadoop/ozone/om/OMMetadataManager.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/interface-storage/src/main/java/org/apache/hadoop/ozone/om/OMMetadataManager.java b/hadoop-ozone/interface-storage/src/main/java/org/apache/hadoop/ozone/om/OMMetadataManager.java
+--- a/hadoop-ozone/interface-storage/src/main/java/org/apache/hadoop/ozone/om/OMMetadataManager.java	(revision 016f12d0a68302d73ee40f8e54636d7e4bb1f1c1)
++++ b/hadoop-ozone/interface-storage/src/main/java/org/apache/hadoop/ozone/om/OMMetadataManager.java	(date 1764079804473)
+@@ -30,19 +30,7 @@
+ import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
+ import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+ import org.apache.hadoop.ozone.common.BlockGroup;
+-import org.apache.hadoop.ozone.om.helpers.ListKeysResult;
+-import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBAccessIdInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBUserPrincipalInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmPrefixInfo;
+-import org.apache.hadoop.ozone.om.helpers.OmDBTenantState;
+-import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
+-import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
+-import org.apache.hadoop.ozone.om.helpers.SnapshotInfo;
+-import org.apache.hadoop.ozone.om.helpers.BucketLayout;
++import org.apache.hadoop.ozone.om.helpers.*;
+ import org.apache.hadoop.ozone.om.lock.IOzoneManagerLock;
+ import org.apache.hadoop.hdds.utils.TransactionInfo;
+ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.ExpiredMultipartUploadsBucket;
+@@ -458,6 +446,11 @@
+    */
+   Table<String, Long> getMultiRaftInfoTable();
+ 
++  /**
++   * Get table for rate limiters info.
++   * @return Table.
++   */
++  Table<String, RateLimiterInfo> getRateLimiterInfoTable();
+ 
+   /**
+    * Return table mapped to the specified table name.
