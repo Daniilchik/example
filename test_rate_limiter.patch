@@ -1,0 +1,84 @@
+Subject: [PATCH] test rate limiter
+---
+Index: hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java b/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java
+new file mode 100644
+--- /dev/null	(date 1764830936093)
++++ b/hadoop-ozone/ozone-manager/src/test/java/org/apache/hadoop/ozone/om/ratelimiter/TestLeakyBucketRateLimiter.java	(date 1764830936093)
+@@ -0,0 +1,72 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.ozone.om.ratelimiter;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++public class TestLeakyBucketRateLimiter {
++
++    @Test
++    public void testAllowsUpToCapacityThenRejects() {
++        LeakyBucketRateLimiter limiter = new LeakyBucketRateLimiter(10, 10);
++
++        for (int i = 0; i < 11; i++) {
++            assertTrue(limiter.tryAcquire(), "Request " + i + " must be allowed");
++            System.out.println(i);
++        }
++
++        assertFalse(limiter.tryAcquire(),
++                "Request beyond capacity must be rejected");
++    }
++
++    @Test
++    public void testRespectsRpsOverTime() {
++        int rps = 2;
++        int capacity = 2;
++        LeakyBucketRateLimiter limiter = new LeakyBucketRateLimiter(rps, capacity);
++
++        int allowed = 0;
++        int rejected = 0;
++
++        long startNanos = System.nanoTime();
++
++        long durationNanos;
++        do {
++            if (limiter.tryAcquire()) {
++                allowed++;
++            } else {
++                rejected++;
++            }
++            durationNanos = System.nanoTime() - startNanos;
++        } while (durationNanos < 1_000_000_000L);
++
++        double durationSeconds = durationNanos / 1_000_000_000.0;
++
++        double theoreticalMaxAllowed = capacity + rps * durationSeconds;
++
++        assertTrue(allowed > 0, "Some requests must be allowed");
++        assertTrue(rejected > 0, "Some requests must eventually be rejected");
++
++        assertTrue(allowed <= theoreticalMaxAllowed + 1,
++                "Allowed=" + allowed + " exceeds theoretical upper bound=" +
++                        theoreticalMaxAllowed + " with tolerance=" + 1);
++    }
++}
