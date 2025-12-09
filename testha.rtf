@@ -1,0 +1,304 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;\f1\fmodern\fcharset0 Courier-Oblique;}
+{\colortbl;\red255\green255\blue255;\red103\green107\blue114;\red23\green23\blue26;\red195\green123\blue90;
+\red174\green176\blue183;\red164\green160\blue78;\red185\green101\blue173;\red78\green112\blue88;\red89\green158\blue96;
+\red38\green157\blue169;\red71\green149\blue242;}
+{\*\expandedcolortbl;;\csgenericrgb\c40392\c41961\c44706;\csgenericrgb\c9020\c9020\c10196;\csgenericrgb\c76471\c48235\c35294;
+\csgenericrgb\c68235\c69020\c71765;\csgenericrgb\c64314\c62745\c30588;\csgenericrgb\c72549\c39608\c67843;\csgenericrgb\c30588\c43922\c34510;\csgenericrgb\c34902\c61961\c37647;
+\csgenericrgb\c14902\c61569\c66275;\csgenericrgb\c27843\c58431\c94902;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f0\fs26 \cf2 \cb3 /*\
+ * Licensed to the Apache Software Foundation (ASF) under one\
+ * or more contributor license agreements.  See the NOTICE file\
+ * distributed with this work for additional information\
+ * regarding copyright ownership.  The ASF licenses this file\
+ * to you under the Apache License, Version 2.0 (the\
+ * "License"); you may not use this file except in compliance\
+ * with the License.  You may obtain a copy of the License at\
+ *\
+ *     http://www.apache.org/licenses/LICENSE-2.0\
+ *\
+ * Unless required by applicable law or agreed to in writing, software\
+ * distributed under the License is distributed on an "AS IS" BASIS,\
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\
+ * See the License for the specific language governing permissions and\
+ * limitations under the License.\
+ */\
+\
+\cf4 package \cf5 org.apache.hadoop.ozone.ratelimiters;\
+\
+\cf4 import \cf5 java.io.IOException;\
+\cf4 import \cf5 java.util.UUID;\
+\
+\cf4 import \cf5 org.apache.hadoop.hdds.conf.OzoneConfiguration;\
+\cf4 import \cf5 org.apache.hadoop.ozone.MiniOzoneCluster;\
+\cf4 import \cf5 org.apache.hadoop.ozone.MiniOzoneHAClusterImpl;\
+\cf4 import \cf5 org.apache.hadoop.ozone.OzoneConfigKeys;\
+\cf4 import \cf5 org.apache.hadoop.ozone.client.OzoneBucket;\
+\cf4 import \cf5 org.apache.hadoop.ozone.client.OzoneClient;\
+\cf4 import \cf5 org.apache.hadoop.ozone.client.OzoneVolume;\
+\cf4 import \cf5 org.apache.hadoop.ozone.client.rpc.RpcClient;\
+\cf4 import \cf5 org.apache.hadoop.ozone.om.OMMetadataManager;\
+\cf4 import \cf5 org.apache.hadoop.ozone.om.OzoneManager;\
+\cf4 import \cf5 org.apache.hadoop.ozone.om.exceptions.OMException;\
+\cf4 import \cf5 org.apache.hadoop.ozone.om.helpers.RateLimiterInfo;\
+\cf4 import \cf5 org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RateLimiterType;\
+\cf4 import \cf5 org.apache.hadoop.test.GenericTestUtils;\
+\cf4 import \cf5 org.junit.\cf6 After\cf5 ;\
+\cf4 import \cf5 org.junit.\cf6 Before\cf5 ;\
+\cf4 import \cf5 org.junit.\cf6 Test\cf5 ;\
+\
+\cf4 import static \cf5 org.apache.hadoop.ozone.OzoneConfigKeys.
+\f1\i \cf7 OZONE_ACL_ENABLED
+\f0\i0 \cf5 ;\
+\cf4 import static \cf5 org.apache.hadoop.ozone.OzoneConfigKeys.
+\f1\i \cf7 OZONE_ADMINISTRATORS_WILDCARD
+\f0\i0 \cf5 ;\
+\cf4 import static \cf5 org.junit.Assert.
+\f1\i assertEquals
+\f0\i0 ;\
+\cf4 import static \cf5 org.junit.Assert.
+\f1\i assertTrue
+\f0\i0 ;\
+\cf4 import static \cf5 org.junit.Assert.
+\f1\i fail
+\f0\i0 ;\
+\
+
+\f1\i \cf8 /**\
+ * HA integration tests for rate limiters.\
+ */\
+
+\f0\i0 \cf4 public class \cf5 TestRateLimitersHA \{\
+\
+  \cf4 private static final \cf5 String 
+\f1\i \cf7 VOLUME 
+\f0\i0 \cf5 = \cf9 "vol1"\cf5 ;\
+  \cf4 private static final \cf5 String 
+\f1\i \cf7 BUCKET1 
+\f0\i0 \cf5 = \cf9 "bucket1"\cf5 ;\
+  \cf4 private static final \cf5 String 
+\f1\i \cf7 BUCKET2 
+\f0\i0 \cf5 = \cf9 "bucket2"\cf5 ;\
+\
+  \cf4 private \cf5 MiniOzoneHAClusterImpl \cf7 cluster\cf5 ;\
+  \cf4 private \cf5 OzoneConfiguration \cf7 conf\cf5 ;\
+  \cf4 private \cf5 String \cf7 clusterId\cf5 ;\
+  \cf4 private \cf5 String \cf7 scmId\cf5 ;\
+  \cf4 private \cf5 String \cf7 omServiceId\cf5 ;\
+  \cf4 private int \cf7 numOfOMs \cf5 = \cf10 3\cf5 ;\
+  \cf4 private \cf5 OzoneClient \cf7 client\cf5 ;\
+  \cf4 private \cf5 RpcClient \cf7 rpcClient\cf5 ;\
+\
+  \cf6 @Before\
+  \cf4 public void \cf11 init\cf5 () \cf4 throws \cf5 Exception \{\
+    \cf7 conf \cf5 = \cf4 new \cf5 OzoneConfiguration();\
+    \cf7 clusterId \cf5 = UUID.
+\f1\i randomUUID
+\f0\i0 ().toString();\
+    \cf7 scmId \cf5 = UUID.
+\f1\i randomUUID
+\f0\i0 ().toString();\
+    \cf7 omServiceId \cf5 = \cf9 "omServiceId1"\cf5 ;\
+\
+    \cf7 conf\cf5 .setBoolean(
+\f1\i \cf7 OZONE_ACL_ENABLED
+\f0\i0 \cf5 , \cf4 true\cf5 );\
+    \cf7 conf\cf5 .set(OzoneConfigKeys.
+\f1\i \cf7 OZONE_ADMINISTRATORS
+\f0\i0 \cf5 ,\
+            
+\f1\i \cf7 OZONE_ADMINISTRATORS_WILDCARD
+\f0\i0 \cf5 );\
+\
+    \cf7 cluster \cf5 = (MiniOzoneHAClusterImpl) MiniOzoneCluster.
+\f1\i newOMHABuilder
+\f0\i0 (\cf7 conf\cf5 )\
+            .setClusterId(\cf7 clusterId\cf5 )\
+            .setScmId(\cf7 scmId\cf5 )\
+            .setOMServiceId(\cf7 omServiceId\cf5 )\
+            .setNumOfOzoneManagers(\cf7 numOfOMs\cf5 )\
+            .build();\
+\
+    \cf7 cluster\cf5 .waitForClusterToBeReady();\
+\
+    \cf7 client \cf5 = \cf7 cluster\cf5 .newClient();\
+    \cf7 rpcClient \cf5 = (RpcClient) \cf7 client\cf5 .getObjectStore().getClientProxy();\
+\
+    \cf7 client\cf5 .getObjectStore().createVolume(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 );\
+    OzoneVolume volume = \cf7 client\cf5 .getObjectStore().getVolume(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 );\
+    volume.createBucket(
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 );\
+    volume.createBucket(
+\f1\i \cf7 BUCKET2
+\f0\i0 \cf5 );\
+  \}\
+\
+  \cf6 @After\
+  \cf4 public void \cf11 shutdown\cf5 () \{\
+    \cf4 if \cf5 (\cf7 cluster \cf5 != \cf4 null\cf5 ) \{\
+      \cf7 cluster\cf5 .shutdown();\
+    \}\
+  \}\
+\
+  \cf6 @Test\
+  \cf4 public void \cf11 testRateLimiterConfigReplicatedToAllOzoneManagers\cf5 ()\
+          \cf4 throws \cf5 Exception \{\
+\
+    \cf4 int \cf5 rps = \cf10 1\cf5 ;\
+    RateLimiterType type = RateLimiterType.
+\f1\i \cf7 WRITE
+\f0\i0 \cf5 ;\
+\
+    \cf7 rpcClient\cf5 .createRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 , rps, type);\
+\
+    GenericTestUtils.
+\f1\i waitFor
+\f0\i0 (() -> \{\
+      \cf4 try \cf5 \{\
+        \cf4 return \cf5 allOmHaveRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 , \cf7 rps\cf5 , \cf7 type\cf5 );\
+      \} \cf4 catch \cf5 (IOException e) \{\
+        \cf4 return false\cf5 ;\
+      \}\
+    \}, \cf10 500\cf5 , \cf10 10_000\cf5 );\
+  \}\
+\
+  \cf6 @Test\
+  \cf4 public void \cf11 testWriteRequestsAreRateLimitedPerBucket\cf5 () \cf4 throws \cf5 Exception \{\
+    \cf4 int \cf5 rps = \cf10 10\cf5 ;\
+    RateLimiterType type = RateLimiterType.
+\f1\i \cf7 WRITE
+\f0\i0 \cf5 ;\
+\
+    \cf7 rpcClient\cf5 .createRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET2
+\f0\i0 \cf5 , rps, type);\
+\
+    OzoneVolume volume = \cf7 client\cf5 .getObjectStore().getVolume(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 );\
+    OzoneBucket bucket2 = volume.getBucket(
+\f1\i \cf7 BUCKET2
+\f0\i0 \cf5 );\
+\
+    \cf4 boolean \cf5 rejected = \cf4 false\cf5 ;\
+    \cf4 for \cf5 (\cf4 int \cf5 i = \cf10 0\cf5 ; i < \cf10 100\cf5 ; i++) \{\
+      \cf4 try \cf5 \{\
+        bucket2.createKey(\cf9 "k-" \cf5 + i, \cf10 1\cf5 );\
+      \} \cf4 catch \cf5 (IOException e) \{\
+        String msg = e.getMessage();\
+        \cf4 if \cf5 (msg != \cf4 null \cf5 && msg.contains(\cf9 "Rate limit exceeded"\cf5 )) \{\
+          rejected = \cf4 true\cf5 ;\
+          \cf4 break\cf5 ;\
+        \} \cf4 else \cf5 \{\
+          \cf4 throw \cf5 e;\
+        \}\
+      \}\
+    \}\
+    
+\f1\i assertTrue
+\f0\i0 (\cf9 "Write requests on bucket2 must be limited"\cf5 , rejected);\
+  \}\
+\
+  \cf6 @Test\
+  \cf4 public void \cf11 testDuplicateCreateDoesNotOverride\cf5 ()\
+          \cf4 throws \cf5 Exception \{\
+\
+    \cf4 int \cf5 initialRps = \cf10 10\cf5 ;\
+    RateLimiterType type = RateLimiterType.
+\f1\i \cf7 WRITE
+\f0\i0 \cf5 ;\
+\
+    \cf7 rpcClient\cf5 .createRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 , initialRps, type);\
+\
+    GenericTestUtils.
+\f1\i waitFor
+\f0\i0 (() -> \{\
+      \cf4 try \cf5 \{\
+        \cf4 return \cf5 allOmHaveRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 , \cf7 initialRps\cf5 , \cf7 type\cf5 );\
+      \} \cf4 catch \cf5 (IOException e) \{\
+        \cf4 return false\cf5 ;\
+      \}\
+    \}, \cf10 200\cf5 , \cf10 10_000\cf5 );\
+\
+    \cf4 int \cf5 newRps = \cf10 200\cf5 ;\
+\
+    \cf4 try \cf5 \{\
+      \cf7 rpcClient\cf5 .createRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 , newRps, type);\
+      
+\f1\i fail
+\f0\i0 (\cf9 "Expected OMException with RATELIMITER_ALREADY_EXISTS"\cf5 );\
+    \} \cf4 catch \cf5 (OMException e) \{\
+      
+\f1\i assertEquals
+\f0\i0 (\cf9 "Unexpected result code"\cf5 ,\
+              OMException.ResultCodes.
+\f1\i \cf7 RATELIMITER_ALREADY_EXISTS
+\f0\i0 \cf5 , e.getResult());\
+    \}\
+\
+    
+\f1\i assertTrue
+\f0\i0 (\
+            \cf9 "Existing rate limiter config must remain unchanged after duplicate create"\cf5 ,\
+            allOmHaveRateLimiter(
+\f1\i \cf7 VOLUME
+\f0\i0 \cf5 , 
+\f1\i \cf7 BUCKET1
+\f0\i0 \cf5 , initialRps, type));\
+  \}\
+\
+  \cf4 private boolean \cf11 allOmHaveRateLimiter\cf5 (String volume, String bucket,\
+                                       \cf4 int \cf5 expectedRps,\
+                                       RateLimiterType type) \cf4 throws \cf5 IOException \{\
+    \cf4 for \cf5 (OzoneManager om : \cf7 cluster\cf5 .getOzoneManagersList()) \{\
+      OMMetadataManager mm = om.getMetadataManager();\
+\
+      String bucketKey = mm.getBucketKey(volume, bucket);\
+      String dbKey = bucketKey + \cf9 ":" \cf5 + type.name();\
+\
+      RateLimiterInfo info = mm.getRateLimiterInfoTable().get(dbKey);\
+      \cf4 if \cf5 (info == \cf4 null\cf5 ) \{\
+        \cf4 return false\cf5 ;\
+      \}\
+      \cf4 if \cf5 (info.getRps() != expectedRps\
+                  || info.getType() != type\
+                  || !volume.equals(info.getVolumeName())\
+                  || !bucket.equals(info.getBucketName())) \{\
+        \cf4 return false\cf5 ;\
+      \}\
+    \}\
+    \cf4 return true\cf5 ;\
+  \}\
+\}\
+\
+}
