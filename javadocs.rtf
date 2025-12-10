@@ -1,0 +1,57 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 /**\
+ * OM client request that creates a new bucket-level rate limiter\
+ * and persists its configuration in OM metadata.\
+ */\
+public class CreateRateLimiterRequest extends OMClientRequest \{\
+    ...\
+\}\
+\
+/**\
+ * OM client request that removes an existing bucket-level rate limiter\
+ * from OM metadata and the in-memory RateLimiterManager.\
+ */\
+public class DeleteRateLimiterRequest extends OMClientRequest \{\
+    ...\
+\}\
+\
+/**\
+ * OM client request that lists bucket-level rate limiters from OM metadata,\
+ * optionally filtered by volume and bucket.\
+ */\
+public class ListRateLimitersRequest extends OMClientRequest \{\
+    ...\
+\}\
+\
+\
+\
+\
+/**\
+ * OM client response for CreateRateLimiterRequest, wrapping the\
+ * protobuf CreateRateLimiterResponse returned to the client.\
+ */\
+public class CreateRateLimiterResponse extends OMClientResponse \{\
+    ...\
+\}\
+\
+/**\
+ * OM client response for DeleteRateLimiterRequest, wrapping the\
+ * protobuf DeleteRateLimiterResponse returned to the client.\
+ */\
+public class DeleteRateLimiterResponse extends OMClientResponse \{\
+    ...\
+\}\
+\
+/**\
+ * OM client response for ListRateLimitersRequest, wrapping the\
+ * protobuf ListRateLimiterResponse returned to the client.\
+ */\
+public class ListRateLimitersResponse extends OMClientResponse \{\
+    ...\
+\}}
