@@ -1,0 +1,80 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;\f1\fmodern\fcharset0 Courier-Oblique;}
+{\colortbl;\red255\green255\blue255;\red195\green123\blue90;\red23\green23\blue26;\red174\green176\blue183;
+\red164\green160\blue78;\red185\green101\blue173;\red78\green112\blue88;\red86\green148\blue105;\red87\green152\blue107;
+\red71\green149\blue242;\red38\green157\blue169;\red89\green158\blue96;}
+{\*\expandedcolortbl;;\csgenericrgb\c76471\c48235\c35294;\csgenericrgb\c9020\c9020\c10196;\csgenericrgb\c68235\c69020\c71765;
+\csgenericrgb\c64314\c62745\c30588;\csgenericrgb\c72549\c39608\c67843;\csgenericrgb\c30588\c43922\c34510;\csgenericrgb\c33725\c58039\c41176;\csgenericrgb\c34118\c59608\c41961;
+\csgenericrgb\c27843\c58431\c94902;\csgenericrgb\c14902\c61569\c66275;\csgenericrgb\c34902\c61961\c37647;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f0\fs26 \cf2 \cb3 package \cf4 org.apache.hadoop.ozone.om.ratelimiter;\
+\
+\cf2 import \cf4 org.junit.jupiter.api.\cf5 Test\cf4 ;\
+\cf2 import \cf4 org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;\
+\
+\cf2 import static \cf4 org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper.
+\f1\i \cf6 RATE_LIMITED_READ_CMDS
+\f0\i0 \cf4 ;\
+\cf2 import static \cf4 org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper.
+\f1\i \cf6 RATE_LIMITED_WRITE_CMDS
+\f0\i0 \cf4 ;\
+\cf2 import static \cf4 org.junit.jupiter.api.Assertions.
+\f1\i assertEquals
+\f0\i0 ;\
+\
+\cf2 public class \cf4 TestRateLimiterCoverage \{\
+\
+    
+\f1\i \cf7 /**\
+     * Guard test to keep OMRequest \{\cf8 @link\
+     \cf7 * org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type\}\
+     * in sync with rate-limited commands.\
+     *\
+     * \cf9 <p>\cf7 If this test fails after adding a new Type:\
+     * \cf9 <ul>\
+     \cf7 *   \cf9 <li>\cf7 If the new Type is \cf9 <b>\cf7 not\cf9 </b> \cf7 bucket-related, increment\
+     *       \{\cf8 @code \cf7 notSupportedCount\}.\cf9 </li>\
+     \cf7 *   \cf9 <li>\cf7 If the new Type \cf9 <b>\cf7 is\cf9 </b> \cf7 bucket-related and should be\
+     *       rate-limited, add it to\
+     *       \{\cf8 @link \cf7 org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper#RATE_LIMITED_READ_CMDS\}\
+     *       or\
+     *       \{\cf8 @link \cf7 org.apache.hadoop.ozone.om.ratelimiter.RateLimiterHelper#RATE_LIMITED_WRITE_CMDS\},\
+     *       and update\
+     *       \{\cf8 @link \cf7 org.apache.hadoop.ozone.om.RateLimiterManager#extractVolumeBucket\}.\cf9 </li>\
+     \cf7 * \cf9 </ul>\
+     \cf7 */\
+    
+\f0\i0 \cf5 @Test\
+    \cf2 public void \cf10 testOmRequestTypeCountGuard\cf4 () \{\
+        \cf2 final int \cf4 currentSupportedCount = 
+\f1\i \cf6 RATE_LIMITED_READ_CMDS
+\f0\i0 \cf4 .size() + 
+\f1\i \cf6 RATE_LIMITED_WRITE_CMDS
+\f0\i0 \cf4 .size();\
+        \cf2 final int \cf4 notSupportedCount = \cf11 58\cf4 ;\
+        \cf2 final int \cf4 expectedTypeCount = OzoneManagerProtocolProtos.Type.
+\f1\i values
+\f0\i0 ().\cf6 length \cf4 - notSupportedCount;\
+\
+        
+\f1\i assertEquals
+\f0\i0 (expectedTypeCount,\
+                currentSupportedCount,\
+                \cf12 "OMRequest Type enum size changed. If you added a new Type, " \cf4 +\
+                        \cf12 "review and update RateLimiterManager."\cf4 );\
+    \}\
+\}\
+\
+\
+\
+\
+
+\f1\i \cf7 /**\
+ * Attempts to acquire permission for a single request.\
+ *\
+ * \cf8 @return \cf7 \{\cf8 @code \cf7 true\} if the request is allowed under the current rate\
+ *         limits, or \{\cf8 @code \cf7 false\} if it should be rejected\
+ */\
+}
