@@ -1,0 +1,48 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 #!/usr/bin/env bash\
+set -euo pipefail\
+\
+manifest="$\{1:-deleted_blocks.tsv\}"\
+\
+if [[ ! -f "$manifest" ]]; then\
+  echo "Manifest file not found: $manifest"\
+  exit 1\
+fi\
+\
+mapfile -t LINES < <(tail -n +2 "$manifest" | sed '/^[[:space:]]*$/d')\
+\
+if [[ "$\{#LINES[@]\}" -eq 0 ]]; then\
+  echo "Manifest is empty: $manifest"\
+  exit 1\
+fi\
+\
+missing=0\
+found=0\
+\
+echo "Checking deleted blocks from: $manifest"\
+echo\
+\
+for line in "$\{LINES[@]\}"; do\
+  IFS=$'\\t' read -r cid host chunks_dir block_file full_path <<< "$line"\
+\
+  if ssh -n "$host" "sudo test -e \\"$\{full_path\}\\"" 2>/dev/null; then\
+    echo "FOUND   cid=$\{cid\} host=$\{host\} file=$\{full_path\}"\
+    found=$((found + 1))\
+  else\
+    echo "MISSING cid=$\{cid\} host=$\{host\} file=$\{full_path\}"\
+    missing=$((missing + 1))\
+  fi\
+done\
+\
+echo\
+echo "Summary: FOUND=$\{found\} MISSING=$\{missing\} TOTAL=$((found + missing))"\
+\
+if [[ "$missing" -gt 0 ]]; then\
+  exit 2\
+fi}
