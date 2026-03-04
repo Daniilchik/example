@@ -9,60 +9,24 @@
 set -euo pipefail\
 \
 n="$\{1:-20\}"\
-ssh_opts=($\{SSH_OPTS:- -o BatchMode=yes -o ConnectTimeout=5\})\
 \
-echo "Collecting first $\{n\} container IDs..."\
 cids="$(ozone admin container list \\\
   | grep -oE '"containerID"[[:space:]]*:[[:space:]]*[0-9]+' \\\
   | head -n "$n" \\\
   | grep -oE '[0-9]+')"\
 \
-if [[ -z "$cids" ]]; then\
-  echo "Failed to extract container IDs from JSON."\
-  exit 1\
-fi\
-\
 while read -r cid; do\
   [[ -z "$cid" ]] && continue\
 \
-  info="$(ozone admin container info "$cid")"\
-  host="$(printf '%s\\n' "$info" \\\
+  host="$(ozone admin container info "$cid" \\\
     | grep -oE 'Location:[[:space:]]*[^]]+' \\\
-    | head -n1 \\\
+    | head -n 1 \\\
     | sed -E 's/.*Location:[[:space:]]*[^/]+\\/([^]]+).*/\\1/')"\
 \
-  if [[ -z "$host" ]]; then\
-    echo "For container #$\{cid\} could not parse replica host."\
-    echo\
-    continue\
-  fi\
+  echo "Container $\{cid\} host $\{host\}"\
 \
-  echo "For container #$\{cid\} selected replica on host: $\{host\}"\
+  path="$(ssh "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" || true)"\
 \
-  chunks_dir="$(ssh "$\{ssh_opts[@]\}" "$host" \\\
-    "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" \\\
-    2>/dev/null || true)"\
-\
-  if [[ -z "$chunks_dir" ]]; then\
-    echo "Did not find containerDir on host $\{host\}"\
-    echo\
-    continue\
-  fi\
-\
-  echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
-\
-  blocks="$(ssh "$\{ssh_opts[@]\}" "$host" \\\
-    "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" \\\
-    2>/dev/null || true)"\
-\
-  cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
-  if [[ "$cnt" -lt 3 ]]; then\
-    echo "Not enough blocks for selection in replica on host $\{host\}"\
-    echo\
-    continue\
-  fi\
-\
-  echo "Selected 3 random blocks:"\
-  printf '%s\\n' "$blocks"\
+  echo "Path: $\{path\}"\
   echo\
 done <<< "$cids"}
