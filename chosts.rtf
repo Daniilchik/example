@@ -9,6 +9,10 @@
 set -euo pipefail\
 \
 n="$\{1:-20\}"\
+manifest="$\{2:-deleted_blocks.tsv\}"\
+\
+: > "$manifest"\
+printf "cid\\thost\\tchunks_dir\\tblock_file\\tfull_path\\n" >> "$manifest"\
 \
 mapfile -t CIDS < <(\
   ozone admin container list \\\
@@ -54,7 +58,7 @@ for cid in "$\{CIDS[@]\}"; do\
 \
   echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
 \
-  blocks="$(ssh -n "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" 2>/dev/null || true)"\
+  blocks="$(ssh -n "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\$\\" | shuf | head -n 3" 2>/dev/null || true)"\
   cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
 \
   if [[ "$cnt" -lt 3 ]]; then\
@@ -65,5 +69,19 @@ for cid in "$\{CIDS[@]\}"; do\
 \
   echo "Selected 3 random blocks:"\
   printf '%s\\n' "$blocks"\
+\
+  while IFS= read -r b; do\
+    [[ -z "$b" ]] && continue\
+    full_path="$\{chunks_dir%/\}/$b"\
+\
+    ssh -n "$host" "sudo rm -f -- \\"$\{full_path\}\\"" 2>/dev/null || true\
+\
+    printf "%s\\t%s\\t%s\\t%s\\t%s\\n" \\\
+      "$cid" "$host" "$chunks_dir" "$b" "$full_path" >> "$manifest"\
+  done <<< "$blocks"\
+\
+  echo "Deleted 3 random blocks on host $\{host\} for container #$\{cid\}"\
   echo\
-done}
+done\
+\
+echo "Manifest written to: $manifest"}
