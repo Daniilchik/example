@@ -10,25 +10,41 @@ set -euo pipefail\
 \
 n="$\{1:-20\}"\
 \
-cids="$(ozone admin container list \\\
-  | grep -oE '"containerID"[[:space:]]*:[[:space:]]*[0-9]+' \\\
-  | head -n "$n" \\\
-  | grep -oE '[0-9]+')"\
+mapfile -t CIDS < <(\
+  ozone admin container list \\\
+    | grep -oE '"containerID"[[:space:]]*:[[:space:]]*[0-9]+' \\\
+    | head -n "$n" \\\
+    | grep -oE '[0-9]+'\
+)\
 \
-while read -r cid; do\
+for cid in "$\{CIDS[@]\}"; do\
   [[ -z "$cid" ]] && continue\
 \
-  host="$(ozone admin container info "$cid" \\\
+  info="$(ozone admin container info "$cid" 2>/dev/null || true)"\
+  if [[ -z "$info" ]]; then\
+    echo "For container #$\{cid\} failed to run container info"\
+    echo\
+    continue\
+  fi\
+\
+  host="$(printf '%s\\n' "$info" \\\
     | grep -oE 'Location:[[:space:]]*[^]]+' \\\
     | head -n 1 \\\
     | sed -E 's/.*Location:[[:space:]]*[^/]+\\/([^]]+).*/\\1/' \\\
     | tr -d '\\r' \\\
     | sed 's/[[:space:]]*$//' \\\
-    | sed 's/,$//')"\
+    | sed 's/,$//' || true)"\
+\
+  if [[ -z "$host" ]]; then\
+    echo "For container #$\{cid\} could not parse replica host"\
+    echo\
+    continue\
+  fi\
 \
   echo "For container #$\{cid\} selected replica on host: $\{host\}"\
 \
-  chunks_dir="$(ssh -n "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" || true)"\
+  chunks_dir="$(ssh -n "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" 2>/dev/null || true)"\
+  chunks_dir="$(printf '%s' "$chunks_dir" | head -n 1 | tr -d '\\r')"\
 \
   if [[ -z "$chunks_dir" ]]; then\
     echo "Did not find containerDir on host $\{host\}"\
@@ -38,9 +54,9 @@ while read -r cid; do\
 \
   echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
 \
-  blocks="$(ssh -n "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" || true)"\
-\
+  blocks="$(ssh -n "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" 2>/dev/null || true)"\
   cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
+\
   if [[ "$cnt" -lt 3 ]]; then\
     echo "Not enough blocks for selection in replica on host $\{host\}"\
     echo\
@@ -50,4 +66,4 @@ while read -r cid; do\
   echo "Selected 3 random blocks:"\
   printf '%s\\n' "$blocks"\
   echo\
-done <<< "$cids"}
+done}
