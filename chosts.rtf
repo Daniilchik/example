@@ -1,0 +1,40 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 .SFNS-Regular;}
+{\colortbl;\red255\green255\blue255;\red14\green14\blue14;}
+{\*\expandedcolortbl;;\cssrgb\c6700\c6700\c6700;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f0\fs28 \cf2 #!/usr/bin/env bash\
+set -euo pipefail\
+\
+n="$\{1:-20\}"\
+\
+echo "Collecting first $\{n\} container IDs..."\
+cids="$(ozone admin container list | awk '\{for(i=1;i<=NF;i++) if($i~/^[0-9]+$/) print $i\}' | awk '!s[$0]++' | head -n "$n")"\
+\
+if [[ -z "$\{cids\}" ]]; then\
+  echo "Failed to parse container IDs from 'ozone admin container list'."\
+  exit 1\
+fi\
+\
+echo "Selected container IDs:"\
+echo "$\{cids\}"\
+echo\
+\
+echo "Fetching replica hosts for selected containers..."\
+hosts_tmp="$(mktemp)"\
+trap 'rm -f "$hosts_tmp"' EXIT\
+\
+while read -r cid; do\
+  echo "Container $\{cid\}:"\
+  ozone admin container info "$cid" \\\
+    | grep -Eo '([A-Za-z0-9._-]+):[0-9]+' \\\
+    | sed 's/:.*$//' \\\
+    | awk '!s[$0]++' \\\
+    | tee -a "$hosts_tmp"\
+  echo\
+done <<< "$\{cids\}"\
+\
+echo "Unique hosts:"\
+sort -u "$hosts_tmp"}
