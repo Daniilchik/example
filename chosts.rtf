@@ -9,13 +9,7 @@
 set -euo pipefail\
 \
 n="$\{1:-20\}"\
-remote_user="$\{REMOTE_USER:-\}"\
 ssh_opts=($\{SSH_OPTS:- -o BatchMode=yes -o ConnectTimeout=5\})\
-\
-if [[ -z "$\{remote_user\}" ]]; then\
-  echo "Set REMOTE_USER env var (e.g. export REMOTE_USER=ozone)."\
-  exit 1\
-fi\
 \
 echo "Collecting first $\{n\} container IDs..."\
 cids="$(ozone admin container list \\\
@@ -28,10 +22,8 @@ if [[ -z "$cids" ]]; then\
   exit 1\
 fi\
 \
-i=0\
 while read -r cid; do\
   [[ -z "$cid" ]] && continue\
-  i=$((i+1))\
 \
   info="$(ozone admin container info "$cid")"\
   host="$(printf '%s\\n' "$info" \\\
@@ -47,9 +39,9 @@ while read -r cid; do\
 \
   echo "For container #$\{cid\} selected replica on host: $\{host\}"\
 \
-  ssh "$\{ssh_opts[@]\}" "$\{remote_user\}@$\{host\}" "find / -type d -path '*/$\{cid\}/chunks' -print 2>/dev/null | head -n 1" > /tmp/.oz_chunks_path.$$ 2>/dev/null || true\
-  chunks_dir="$(cat /tmp/.oz_chunks_path.$$ 2>/dev/null || true)"\
-  rm -f /tmp/.oz_chunks_path.$$\
+  chunks_dir="$(ssh "$\{ssh_opts[@]\}" "$host" \\\
+    "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" \\\
+    2>/dev/null || true)"\
 \
   if [[ -z "$chunks_dir" ]]; then\
     echo "Did not find containerDir on host $\{host\}"\
@@ -59,8 +51,9 @@ while read -r cid; do\
 \
   echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
 \
-  blocks="$(ssh "$\{ssh_opts[@]\}" "$\{remote_user\}@$\{host\}" \\\
-    "ls -1 $\{chunks_dir\} 2>/dev/null | grep -E '\\.block$' | shuf | head -n 3" || true)"\
+  blocks="$(ssh "$\{ssh_opts[@]\}" "$host" \\\
+    "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" \\\
+    2>/dev/null || true)"\
 \
   cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
   if [[ "$cnt" -lt 3 ]]; then\
