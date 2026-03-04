@@ -11,15 +11,18 @@ set -euo pipefail\
 n="$\{1:-20\}"\
 \
 echo "Collecting first $\{n\} container IDs..."\
-cids="$(ozone admin container list | awk '\{for(i=1;i<=NF;i++) if($i~/^[0-9]+$/) print $i\}' | awk '!s[$0]++' | head -n "$n")"\
+cids="$(ozone admin container list \\\
+  | awk 'BEGIN\{IGNORECASE=1\} NR==1\{for(i=1;i<=NF;i++) if($i=="containerid"||$i=="containerID") c=i\} NR>1&&c\{print $c\}' \\\
+  | head -n "$n")"\
 \
-if [[ -z "$\{cids\}" ]]; then\
-  echo "Failed to parse container IDs from 'ozone admin container list'."\
+if [[ -z "$cids" ]]; then\
+  echo "Failed to extract container IDs. Showing first 5 lines of output:"\
+  ozone admin container list | head -n 5\
   exit 1\
 fi\
 \
 echo "Selected container IDs:"\
-echo "$\{cids\}"\
+echo "$cids"\
 echo\
 \
 echo "Fetching replica hosts for selected containers..."\
@@ -27,6 +30,7 @@ hosts_tmp="$(mktemp)"\
 trap 'rm -f "$hosts_tmp"' EXIT\
 \
 while read -r cid; do\
+  [[ -z "$cid" ]] && continue\
   echo "Container $\{cid\}:"\
   ozone admin container info "$cid" \\\
     | grep -Eo '([A-Za-z0-9._-]+):[0-9]+' \\\
@@ -34,7 +38,7 @@ while read -r cid; do\
     | awk '!s[$0]++' \\\
     | tee -a "$hosts_tmp"\
   echo\
-done <<< "$\{cids\}"\
+done <<< "$cids"\
 \
 echo "Unique hosts:"\
 sort -u "$hosts_tmp"}
