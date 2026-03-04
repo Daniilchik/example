@@ -28,7 +28,7 @@ while read -r cid; do\
 \
   echo "For container #$\{cid\} selected replica on host: $\{host\}"\
 \
-  chunks_dir="$(ssh "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" || true)"\
+  chunks_dir="$(ssh -n "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" || true)"\
 \
   if [[ -z "$chunks_dir" ]]; then\
     echo "Did not find containerDir on host $\{host\}"\
@@ -38,7 +38,7 @@ while read -r cid; do\
 \
   echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
 \
-  blocks="$(ssh "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" || true)"\
+  blocks="$(ssh -n "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" || true)"\
 \
   cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
   if [[ "$cnt" -lt 3 ]]; then\
