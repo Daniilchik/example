@@ -21,12 +21,33 @@ while read -r cid; do\
   host="$(ozone admin container info "$cid" \\\
     | grep -oE 'Location:[[:space:]]*[^]]+' \\\
     | head -n 1 \\\
-    | sed -E 's/.*Location:[[:space:]]*[^/]+\\/([^]]+).*/\\1/')"\
+    | sed -E 's/.*Location:[[:space:]]*[^/]+\\/([^]]+).*/\\1/' \\\
+    | tr -d '\\r' \\\
+    | sed 's/[[:space:]]*$//' \\\
+    | sed 's/,$//')"\
 \
-  echo "Container $\{cid\} host $\{host\}"\
+  echo "For container #$\{cid\} selected replica on host: $\{host\}"\
 \
-  path="$(ssh "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" || true)"\
+  chunks_dir="$(ssh "$host" "sudo find / -type d -path \\"*/$\{cid\}/chunks\\" 2>/dev/null | head -n 1" || true)"\
 \
-  echo "Path: $\{path\}"\
+  if [[ -z "$chunks_dir" ]]; then\
+    echo "Did not find containerDir on host $\{host\}"\
+    echo\
+    continue\
+  fi\
+\
+  echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
+\
+  blocks="$(ssh "$host" "sudo ls -1 \\"$\{chunks_dir\}\\" 2>/dev/null | grep -E \\"\\\\.block\\\\\\$\\" | shuf | head -n 3" || true)"\
+\
+  cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
+  if [[ "$cnt" -lt 3 ]]; then\
+    echo "Not enough blocks for selection in replica on host $\{host\}"\
+    echo\
+    continue\
+  fi\
+\
+  echo "Selected 3 random blocks:"\
+  printf '%s\\n' "$blocks"\
   echo\
 done <<< "$cids"}
