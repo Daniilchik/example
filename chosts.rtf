@@ -9,6 +9,13 @@
 set -euo pipefail\
 \
 n="$\{1:-20\}"\
+remote_user="$\{REMOTE_USER:-\}"\
+ssh_opts=($\{SSH_OPTS:- -o BatchMode=yes -o ConnectTimeout=5\})\
+\
+if [[ -z "$\{remote_user\}" ]]; then\
+  echo "Set REMOTE_USER env var (e.g. export REMOTE_USER=ozone)."\
+  exit 1\
+fi\
 \
 echo "Collecting first $\{n\} container IDs..."\
 cids="$(ozone admin container list \\\
@@ -21,24 +28,48 @@ if [[ -z "$cids" ]]; then\
   exit 1\
 fi\
 \
-echo "Selected container IDs:"\
-echo "$cids"\
-echo\
-\
-echo "Fetching replica hosts for selected containers..."\
-hosts_tmp="$(mktemp)"\
-trap 'rm -f "$hosts_tmp"' EXIT\
-\
+i=0\
 while read -r cid; do\
   [[ -z "$cid" ]] && continue\
-  echo "Container $\{cid\}:"\
-  ozone admin container info "$cid" \\\
-    | grep -oE 'Location:[[:space:]]*[^]]+' \\\
-    | sed -E 's/.*Location:[[:space:]]*[^/]+\\/([^]]+).*/\\1/' \\\
-    | sort -u \\\
-    | tee -a "$hosts_tmp"\
-  echo\
-done <<< "$cids"\
+  i=$((i+1))\
 \
-echo "Unique hosts:"\
-sort -u "$hosts_tmp"}
+  info="$(ozone admin container info "$cid")"\
+  host="$(printf '%s\\n' "$info" \\\
+    | grep -oE 'Location:[[:space:]]*[^]]+' \\\
+    | head -n1 \\\
+    | sed -E 's/.*Location:[[:space:]]*[^/]+\\/([^]]+).*/\\1/')"\
+\
+  if [[ -z "$host" ]]; then\
+    echo "For container #$\{cid\} could not parse replica host."\
+    echo\
+    continue\
+  fi\
+\
+  echo "For container #$\{cid\} selected replica on host: $\{host\}"\
+\
+  ssh "$\{ssh_opts[@]\}" "$\{remote_user\}@$\{host\}" "find / -type d -path '*/$\{cid\}/chunks' -print 2>/dev/null | head -n 1" > /tmp/.oz_chunks_path.$$ 2>/dev/null || true\
+  chunks_dir="$(cat /tmp/.oz_chunks_path.$$ 2>/dev/null || true)"\
+  rm -f /tmp/.oz_chunks_path.$$\
+\
+  if [[ -z "$chunks_dir" ]]; then\
+    echo "Did not find containerDir on host $\{host\}"\
+    echo\
+    continue\
+  fi\
+\
+  echo "Found containerDir on host $\{host\}: $\{chunks_dir%/chunks\}"\
+\
+  blocks="$(ssh "$\{ssh_opts[@]\}" "$\{remote_user\}@$\{host\}" \\\
+    "ls -1 $\{chunks_dir\} 2>/dev/null | grep -E '\\.block$' | shuf | head -n 3" || true)"\
+\
+  cnt="$(printf '%s\\n' "$blocks" | sed '/^$/d' | wc -l | tr -d ' ')"\
+  if [[ "$cnt" -lt 3 ]]; then\
+    echo "Not enough blocks for selection in replica on host $\{host\}"\
+    echo\
+    continue\
+  fi\
+\
+  echo "Selected 3 random blocks:"\
+  printf '%s\\n' "$blocks"\
+  echo\
+done <<< "$cids"}
