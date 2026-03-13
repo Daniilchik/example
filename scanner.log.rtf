@@ -1,0 +1,19 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 2026-03-13T11:02:11,676 [ContainerDataScanner(/data/hdds/hdds)] ERROR org.apache.hadoop.ozone.container.ozoneimpl.BackgroundContainerDataScanner: Corruption detected in container [3]. Marking it UNHEALTHY.\
+java.io.IOException: Missing chunk file /data/hdds/hdds/CID-3b5aaa9a-408a-4e86-8ef1-6eabfd855a74/current/containerDir0/3/chunks/117883640217600003.block\
+        at org.apache.hadoop.ozone.container.keyvalue.scanner.BlockScanner.scanBlock(BlockScanner.java:102) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerCheck.scanData(KeyValueContainerCheck.java:258) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerCheck.fullCheck(KeyValueContainerCheck.java:155) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer.scanData(KeyValueContainer.java:982) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.ozoneimpl.BackgroundContainerDataScanner.scanContainer(BackgroundContainerDataScanner.java:89) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.ozoneimpl.AbstractBackgroundContainerScanner.scanContainers(AbstractBackgroundContainerScanner.java:98) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.ozoneimpl.AbstractBackgroundContainerScanner.runIteration(AbstractBackgroundContainerScanner.java:73) ~[hdds-container-service-1.4.0.jar:?]\
+        at org.apache.hadoop.ozone.container.ozoneimpl.AbstractBackgroundContainerScanner.run(AbstractBackgroundContainerScanner.java:56) ~[hdds-container-service-1.4.0.jar:?]\
+2026-03-13T11:02:11,692 [ContainerDataScanner(/data/hdds/hdds)] WARN org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer: Moving container /data/hdds/hdds/CID-3b5aaa9a-408a-4e86-8ef1-6eabfd855a74/current/containerDir0/3 to state UNHEALTHY from state:CLOSED\
+2026-03-13T11:02:11,700 [ContainerDataScanner(/data/hdds/hdds)] INFO org.apache.hadoop.ozone.container.ozoneimpl.AbstractBackgroundContainerScanner: Completed an iteration in 0 minutes. Number of iterations (since the data-node restart) : 3, Number of containers scanned in this iteration : 3, Number of unhealthy containers found in this iteration : 2}
