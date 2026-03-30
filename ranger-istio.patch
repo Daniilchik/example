@@ -1,0 +1,146 @@
+diff --git a/helm-charts/ozone/templates/istio/serviceentry.yaml b/helm-charts/ozone/templates/istio/serviceentry.yaml
+index 2be2abd..e1f98b1 100644
+--- a/helm-charts/ozone/templates/istio/serviceentry.yaml
++++ b/helm-charts/ozone/templates/istio/serviceentry.yaml
+@@ -44,5 +44,30 @@ spec:
+   resolution: DNS
+   location: MESH_EXTERNAL
+   {{- end }}
++{{- if and .Values.ranger.enabled .Values.ranger.policyAdminUrl }}
++{{- $rangerUrl := .Values.ranger.policyAdminUrl }}
++{{- $rangerHost := regexReplaceAll "^https?://" $rangerUrl "" | regexReplaceAll ":[0-9]+$" "" | regexReplaceAll "/.*$" "" }}
++{{- $rangerPort := 443 }}
++{{- if regexMatch ":[0-9]+" $rangerUrl }}
++{{- $rangerPort = $rangerUrl | regexFind ":[0-9]+" | trimPrefix ":" | int }}
++{{- end }}
++---
++apiVersion: networking.istio.io/v1beta1
++kind: ServiceEntry
++metadata:
++  name: {{ include "ozone.fullname" . }}-ranger-admin
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++spec:
++  hosts:
++    - {{ $rangerHost | quote }}
++  ports:
++    - number: {{ $rangerPort }}
++      name: https-ranger
++      protocol: HTTPS
++  resolution: DNS
++  location: MESH_EXTERNAL
++{{- end }}
+ {{- end }}
+ {{- end }}
+\ No newline at end of file
+diff --git a/helm-charts/ozone/templates/istio/sidecar.yaml b/helm-charts/ozone/templates/istio/sidecar.yaml
+index 6001d71..6c405ba 100644
+--- a/helm-charts/ozone/templates/istio/sidecar.yaml
++++ b/helm-charts/ozone/templates/istio/sidecar.yaml
+@@ -66,6 +66,10 @@ spec:
+         {{- if .Values.recon.enabled }}
+         - "./{{ .Values.recon.serviceName }}.{{ $ns }}.svc.{{ $dom }}"
+         {{- end}}
++        {{- if and .Values.ranger.enabled .Values.ranger.policyAdminUrl }}
++        {{- $rangerHost := .Values.ranger.policyAdminUrl | regexReplaceAll "^https?://" "" | regexReplaceAll ":[0-9]+$" "" | regexReplaceAll "/.*$" "" }}
++        - "istio-system/{{ $rangerHost }}"
++        {{- end }}
+ {{- end }}
+ 
+ {{- if .Values.datanode.enabled }}
+diff --git a/helm-charts/ozone/templates/om/statefulset.yaml b/helm-charts/ozone/templates/om/statefulset.yaml
+index c165be9..16b832e 100644
+--- a/helm-charts/ozone/templates/om/statefulset.yaml
++++ b/helm-charts/ozone/templates/om/statefulset.yaml
+@@ -71,11 +71,20 @@ spec:
+               valueFrom:
+                 fieldRef:
+                   fieldPath: metadata.name
++            {{- if and $.Values.ranger.enabled $.Values.ranger.caCertSecret }}
++            - name: JAVA_TOOL_OPTIONS
++              value: "-Djavax.net.ssl.trustStore=/ozone/etc/ssl/truststore.jks -Djavax.net.ssl.trustStorePassword=changeit"
++            {{- end }}
+           volumeMounts:
+             - name: config-volume
+               mountPath: /ozone/etc/hadoop
+             - name: data
+               mountPath: /data
++            {{- if and $.Values.ranger.enabled $.Values.ranger.caCertSecret }}
++            - name: ranger-ca
++              mountPath: /ozone/etc/ssl
++              readOnly: true
++            {{- end }}
+           {{- with $.Values.om.resources }}
+           resources:
+             {{- toYaml . | nindent 12 }}
+@@ -84,6 +93,11 @@ spec:
+         - name: config-volume
+           configMap:
+             name: {{ include "ozone.fullname" $ }}-config
++        {{- if and $.Values.ranger.enabled $.Values.ranger.caCertSecret }}
++        - name: ranger-ca
++          secret:
++            secretName: {{ $.Values.ranger.caCertSecret }}
++        {{- end }}
+         {{- if eq $.Values.global.storage.mode "emptyDir" }}
+         - name: data
+           emptyDir: {}
+diff --git a/helm-charts/ozone/values.yaml b/helm-charts/ozone/values.yaml
+index d6f2f34..de647eb 100644
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -368,6 +368,17 @@ hiveMetastore:
+     user: hive
+     password: ""
+ 
++# Ranger plugin configuration (connects to existing Ranger Admin)
++ranger:
++  enabled: false
++  # URL of existing Ranger Admin (required when enabled)
++  policyAdminUrl: ""
++  # Ozone service name registered in Ranger (must match the service name in Ranger UI, e.g. "ozone-dev", "ozone-ift")
++  ozone:
++    serviceName: ""
++  # Secret name containing truststore.jks for Ranger Admin HTTPS
++  caCertSecret: ""
++
+ configuration:
+   files:
+     core-site.xml: |-
+diff --git a/values/values-dev.yaml b/values/values-dev.yaml
+index 1bcfe21..582f292 100644
+--- a/values/values-dev.yaml
++++ b/values/values-dev.yaml
+@@ -136,6 +136,13 @@ hiveMetastore:
+     user: CI11849266-pg-hive
+     password: ''
+ 
++ranger:
++  enabled: false
++  policyAdminUrl: ""
++  ozone:
++    serviceName: "ozone-dev"
++  caCertSecret: ""
++
+ cli:
+   image:
+     repository: ozone-cli
+diff --git a/values/values-ift.yaml b/values/values-ift.yaml
+index 1b29397..2409cae 100644
+--- a/values/values-ift.yaml
++++ b/values/values-ift.yaml
+@@ -127,6 +127,13 @@ hue:
+     user: hue
+     password: ""
+ 
++ranger:
++  enabled: false
++  policyAdminUrl: ""
++  ozone:
++    serviceName: "ozone-ift"
++  caCertSecret: ""
++
+ cli:
+   image:
+     repository: ozone-cli
