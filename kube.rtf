@@ -19,9 +19,6 @@
       echo "=== Schema OK, skipping initialization ==="\
       exit 0\
     fi\
-    echo "=== Dropping partial schema from previous runs ==="\
-    /opt/hive/bin/beeline -u "$DB_URL" -n "$DB_USER" -p "$DB_PASS" \\\
-      --silent=true -e "DROP SCHEMA IF EXISTS $(echo $DB_USER | tr '[:upper:]' '[:lower:]') CASCADE;" 2>/dev/null || true\
     echo "=== Initializing schema ==="\
     # Monitor memory in background\
     (while true; do\
@@ -36,8 +33,8 @@
     echo "=== Memory after schematool ==="\
     cat /proc/self/status | grep -i vm\
     if [ $init_code -ne 0 ]; then\
-      echo "=== Schema init failed ==="\
-      exit 1\
+      echo "=== Schema init failed, sleeping to preserve logs ==="\
+      sleep infinity\
     fi\
     echo "=== Schema initialization complete ==="\
 }
