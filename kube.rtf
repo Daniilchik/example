@@ -1,0 +1,43 @@
+{\rtf1\ansi\ansicpg1251\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;}
+{\colortbl;\red255\green255\blue255;\red195\green123\blue90;\red23\green23\blue26;\red174\green176\blue183;
+}
+{\*\expandedcolortbl;;\csgenericrgb\c76471\c48235\c35294;\csgenericrgb\c9020\c9020\c10196;\csgenericrgb\c68235\c69020\c71765;
+}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f0\fs26 \cf2 \cb3 args\cf4 :\
+  - |\
+    trap 'echo "=== SIGNAL RECEIVED: $? ===" ; echo "Memory at exit:" ; cat /proc/self/status | grep -i vm ; exit 1' TERM INT KILL\
+    set +e\
+    echo "=== Memory limit ==="\
+    cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "unknown"\
+    echo "=== Checking Hive Metastore schema ==="\
+    /opt/hive/bin/schematool -dbType postgres -info\
+    if [ $? -eq 0 ]; then\
+      echo "=== Schema OK, skipping initialization ==="\
+      exit 0\
+    fi\
+    echo "=== Dropping partial schema from previous runs ==="\
+    /opt/hive/bin/beeline -u "$DB_URL" -n "$DB_USER" -p "$DB_PASS" \\\
+      --silent=true -e "DROP SCHEMA IF EXISTS $(echo $DB_USER | tr '[:upper:]' '[:lower:]') CASCADE;" 2>/dev/null || true\
+    echo "=== Initializing schema ==="\
+    # Monitor memory in background\
+    (while true; do\
+      echo "[MEM] $(date +%H:%M:%S) $(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 'N/A') bytes"\
+      sleep 5\
+    done) &\
+    MEM_PID=$!\
+    /opt/hive/bin/schematool -dbType postgres -initSchema --verbose\
+    init_code=$?\
+    kill $MEM_PID 2>/dev/null\
+    echo "=== schematool exit code: $init_code ==="\
+    echo "=== Memory after schematool ==="\
+    cat /proc/self/status | grep -i vm\
+    if [ $init_code -ne 0 ]; then\
+      echo "=== Schema init failed ==="\
+      exit 1\
+    fi\
+    echo "=== Schema initialization complete ==="\
+}
