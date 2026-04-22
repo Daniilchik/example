@@ -1,0 +1,41 @@
+diff --git a/ozone-stack/src/main/resources/stacks/OZONE/1.4.3/services/OZONE/configuration/log4j2.xml b/ozone-stack/src/main/resources/stacks/OZONE/1.4.3/services/OZONE/configuration/log4j2.xml
+index f10e624..b47ed1e 100644
+--- a/ozone-stack/src/main/resources/stacks/OZONE/1.4.3/services/OZONE/configuration/log4j2.xml
++++ b/ozone-stack/src/main/resources/stacks/OZONE/1.4.3/services/OZONE/configuration/log4j2.xml
+@@ -21,6 +21,9 @@
+         <Property name="hadoop.security.log.maxfilesize">${sys:hadoop.security.log.maxfilesize:-4096MB}</Property>
+         <Property name="hadoop.security.log.maxbackupindex">${sys:hadoop.security.log.maxbackupindex:-4}</Property>
+         <Property name="hadoop.security.log.file">${sys:hadoop.security.log.file:-SecurityAuth-${sys:user.name}}</Property>
++        <Property name="ranger.audit.log.file">${sys:ranger.audit.log.file:-ranger-ozone-audit.log}</Property>
++        <Property name="ranger.audit.log.maxfilesize">${sys:ranger.audit.log.maxfilesize:-256MB}</Property>
++        <Property name="ranger.audit.log.maxbackupindex">${sys:ranger.audit.log.maxbackupindex:-20}</Property>
+     </Properties>
+ 
+     <Appenders>
+@@ -42,6 +45,15 @@
+            </DefaultRolloverStrategy>
+         </RollingFile>
+ 
++        <RollingFile name="RANGERAUDIT" fileName="${hadoop.log.dir}/${ranger.audit.log.file}" filePattern="${hadoop.log.dir}/${ranger.audit.log.file}-%d{yyyy-MM-dd}-%i.gz">
++            <PatternLayout pattern="%d{ISO8601} [%t] %p %c: %m%n"/>
++            <Policies>
++                <SizeBasedTriggeringPolicy size="${ranger.audit.log.maxfilesize}"/>
++                <TimeBasedTriggeringPolicy />
++            </Policies>
++            <DefaultRolloverStrategy max="${ranger.audit.log.maxbackupindex}"/>
++        </RollingFile>
++
+         <Async name="Async">
+             <AppenderRef ref="RFA"/>
+         </Async>
+@@ -64,6 +76,10 @@
+             </Filters>
+         </Logger>
+ 
++        <Logger name="xaaudit" level="INFO" additivity="false">
++            <AppenderRef ref="RANGERAUDIT"/>
++        </Logger>
++
+     </Loggers>
+ </Configuration>]]></value>
+         <value-attributes>
