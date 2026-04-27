@@ -1,0 +1,769 @@
+diff --git a/helm-charts/ozone/templates/_helpers.tpl b/helm-charts/ozone/templates/_helpers.tpl
+index 579fdd6..30c9abe 100644
+--- a/helm-charts/ozone/templates/_helpers.tpl
++++ b/helm-charts/ozone/templates/_helpers.tpl
+@@ -169,6 +169,9 @@ Usage:
+ {{- if and .Values.istio.enabled .Values.istio.injection.enabled }}
+ sidecar.istio.io/inject: "true"
+ proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
++{{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsPort }}
++traffic.sidecar.istio.io/excludeOutboundPorts: {{ .Values.fluentBit.restlogsPort | quote }}
++{{- end }}
+ {{- end }}
+ {{- end -}}
+ 
+@@ -198,3 +201,109 @@ Usage: {{- include "ozone.secmanLabels" . | nindent 8 }}
+ secman-injector: enabled
+ {{- end }}
+ {{- end -}}
++
++{{/*
++Fluent-bit sidecar container spec.
++Expects a dict with:
++  ctx        — root context ($)
++  component  — short component name used as `component` label on log events (om, scm, datanode, s3g, recon)
++  auditPath  — absolute path (or glob) of the audit log file to tail
++Usage:
++  {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "om" "auditPath" "/var/log/ozone/om-audit.log") | nindent 8 }}
++*/}}
++{{- define "ozone.fluentbit.container" -}}
++{{- $ctx := .ctx -}}
++- name: fluentbit
++  image: {{ $ctx.Values.fluentBit.image }}
++  imagePullPolicy: {{ $ctx.Values.fluentBit.imagePullPolicy | default "Always" }}
++  env:
++    - name: FLUENTBIT_COMPONENT
++      value: {{ .component | quote }}
++    - name: FLUENTBIT_TECH_LOG_PATH
++      value: /var/log/ozone/{{ .component }}.log
++    - name: FLUENTBIT_AUDIT_LOG_PATH
++      value: {{ .auditPath | quote }}
++    - name: FLUENTBIT_DB_PATH
++      value: /var/log/ozone/fluent-bit.db
++  ports:
++    - containerPort: {{ $ctx.Values.fluentBit.fluentMetricsPort }}
++      name: metrics
++      protocol: {{ $ctx.Values.fluentBit.fluentMetricsProtocol }}
++  resources:
++    limits:
++      cpu: {{ $ctx.Values.fluentBit.resources.limits.cpu | default "20m" }}
++      memory: {{ $ctx.Values.fluentBit.resources.limits.memory | default "128Mi" }}
++    requests:
++      cpu: {{ $ctx.Values.fluentBit.resources.requests.cpu | default "20m" }}
++      memory: {{ $ctx.Values.fluentBit.resources.requests.memory | default "128Mi" }}
++  {{- include "ozone.containerSecurityContext" $ctx | nindent 2 }}
++  volumeMounts:
++    - mountPath: /fluent-bit/etc/
++      name: fluent-bit-ozone-config
++    - mountPath: /tmp
++      name: fluent-bit-tmp
++    - mountPath: /var/log/ozone
++      name: ozone-logs
++    {{- if $ctx.Values.fluentBit.caCertSecret }}
++    - mountPath: /fluent-bit/tls
++      name: fluent-bit-ca
++      readOnly: true
++    {{- end }}
++{{- end -}}
++
++{{/*
++Volumes required for fluent-bit sidecar + shared log dir.
++Usage:
++  {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
++*/}}
++{{- define "ozone.fluentbit.volumes" -}}
++- name: fluent-bit-ozone-config
++  configMap:
++    name: fluent-bit-ozone-config
++- name: fluent-bit-tmp
++  emptyDir: {}
++- name: ozone-logs
++  emptyDir: {}
++{{- if .Values.fluentBit.caCertSecret }}
++- name: fluent-bit-ca
++  secret:
++    secretName: {{ .Values.fluentBit.caCertSecret | quote }}
++{{- end }}
++{{- end -}}
++
++{{/*
++VolumeMount for main container pointing at shared log dir.
++Main container must write to /var/log/ozone so fluent-bit can tail from there.
++Usage:
++  {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
++*/}}
++{{- define "ozone.fluentbit.logsMount" -}}
++- name: ozone-logs
++  mountPath: /var/log/ozone
++{{- end -}}
++
++{{/*
++Idle cli sidecar — lets operators exec into the pod to inspect filesystem,
++config, and shared log volume. Distroless main containers often don't have
++a shell, this one does.
++Usage:
++  {{- include "ozone.cli.container" $ | nindent 8 }}
++*/}}
++{{- define "ozone.cli.container" -}}
++- name: cli
++  image: "{{ .Values.global.image.registry }}/{{ tpl .Values.cli.image.repository . }}:{{ tpl .Values.cli.image.tag . }}"
++  {{- include "ozone.containerSecurityContext" . | nindent 2 }}
++  imagePullPolicy: {{ .Values.global.image.pullPolicy }}
++  command: [ "sleep" ]
++  args: [ "infinity" ]
++  volumeMounts:
++    - name: config-volume
++      mountPath: /ozone/etc/hadoop
++    {{- if .Values.fluentBit.enabled }}
++    {{- include "ozone.fluentbit.logsMount" . | nindent 4 }}
++    {{- end }}
++  {{- with .Values.cli.resources }}
++  resources:
++    {{- toYaml . | nindent 4 }}
++  {{- end }}
++{{- end -}}
+diff --git a/helm-charts/ozone/templates/configmap.yaml b/helm-charts/ozone/templates/configmap.yaml
+index 5bb6f61..10f7180 100644
+--- a/helm-charts/ozone/templates/configmap.yaml
++++ b/helm-charts/ozone/templates/configmap.yaml
+@@ -38,5 +38,13 @@ data:
+           <name>xasecure.audit.is.enabled</name>
+           <value>true</value>
+         </property>
++        <property>
++          <name>xasecure.audit.destination.log4j</name>
++          <value>true</value>
++        </property>
++        <property>
++          <name>xasecure.audit.destination.log4j.logger</name>
++          <value>xaaudit</value>
++        </property>
+       </configuration>
+   {{- end }}
+diff --git a/helm-charts/ozone/templates/datanode/statefulset.yaml b/helm-charts/ozone/templates/datanode/statefulset.yaml
+index 30c9323..df74733 100644
+--- a/helm-charts/ozone/templates/datanode/statefulset.yaml
++++ b/helm-charts/ozone/templates/datanode/statefulset.yaml
+@@ -59,6 +59,10 @@ spec:
+         {{- toYaml . | nindent 8 }}
+       {{- end }}
+       containers:
++        {{- if $.Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "datanode" "auditPath" "/var/log/ozone/dn-audit.log") | nindent 8 }}
++        {{- end }}
++        {{- include "ozone.cli.container" $ | nindent 8 }}
+         - name: datanode
+           image: "{{ $.Values.global.image.registry }}/{{ tpl $.Values.datanode.image.repository $ }}:{{ tpl $.Values.datanode.image.tag $ }}"
+           {{- include "ozone.containerSecurityContext" $ | nindent 10 }}
+@@ -78,10 +82,17 @@ spec:
+             - name: JAVA_OPTS
+               value: "-Djava.net.preferIPv4Stack=true"
+             - name: OZONE_OPTS
+-              value: "-Djava.net.preferIPv4Stack=true"
++              value: "-Djava.net.preferIPv4Stack=true{{- if $.Values.fluentBit.enabled }} -Dhadoop.log.dir=/var/log/ozone -Dhadoop.log.file=datanode.log -Dozone.audit.dn.level=INFO{{- end }}"
++            {{- if $.Values.fluentBit.enabled }}
++            - name: HADOOP_LOG_DIR
++              value: /var/log/ozone
++            {{- end }}
+           volumeMounts:
+             - name: config-volume
+               mountPath: /ozone/etc/hadoop
++            {{- if $.Values.fluentBit.enabled }}
++            {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
++            {{- end }}
+             {{- if eq $.Values.global.storage.mode "storageClass" }}
+             - name: data-{{ first $.Values.global.storage.storageClass.datanode.diskIndices }}
+               mountPath: /data
+@@ -105,6 +116,9 @@ spec:
+             {{- toYaml . | nindent 12 }}
+           {{- end }}
+       volumes:
++        {{- if $.Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
++        {{- end }}
+         - name: config-volume
+           configMap:
+             name: {{ include "ozone.fullname" $ }}-config
+diff --git a/helm-charts/ozone/templates/fluentbit/configmap.yaml b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+index 538fd9e..beaa722 100644
+--- a/helm-charts/ozone/templates/fluentbit/configmap.yaml
++++ b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+@@ -3,7 +3,7 @@
+ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+-  name: fluent-bit-om-config
++  name: fluent-bit-ozone-config
+ data:
+   fluent-bit.conf: |-
+     [SERVICE]
+@@ -18,45 +18,62 @@ data:
+ 
+     [INPUT]
+         Name              tail
+-        Tag               om
+-        Path              ${FLUENTBIT_LOG_PATH}
++        Tag               tech
++        Path              ${FLUENTBIT_TECH_LOG_PATH}
+         DB                ${FLUENTBIT_DB_PATH}
+-        Parser            stringify_message
++        DB.Sync           Normal
++        Path_Key          source_file
++        Mem_Buf_Limit     5MB
++        Skip_Long_Lines   On
++        Refresh_Interval  10
++
++    [INPUT]
++        Name              tail
++        Tag               audit
++        Path              ${FLUENTBIT_AUDIT_LOG_PATH}
++        DB                ${FLUENTBIT_DB_PATH}
++        DB.Sync           Normal
++        Path_Key          source_file
+         Mem_Buf_Limit     5MB
+         Skip_Long_Lines   On
+         Refresh_Interval  10
+ 
+     [FILTER]
+         Name           modify
+-        Match          argo
+-        Add            app_id "SPD_OZONE-CI06618727-CI06618727-202410160000000000" 
+-        Add            type_id "tech"       
++        Match          tech
++        Add            app_id {{ .Values.fluentBit.appId | quote }}
++        Add            type_id "tech"
++        Add            component ${FLUENTBIT_COMPONENT}
++        Add            podname ${HOSTNAME}
+         Rename         log message
++
++    [FILTER]
++        Name           modify
++        Match          audit
++        Add            app_id {{ .Values.fluentBit.appId | quote }}
++        Add            type_id "Audit"
++        Add            component ${FLUENTBIT_COMPONENT}
+         Add            podname ${HOSTNAME}
++        Rename         log message
+ 
+     [OUTPUT]
+-        Name  http
+-        Match *
+-        Host  {{ .Values.fluentBit.restlogsHost }}
+-        Port  {{ .Values.fluentBit.restlogsPort }} 
+-        Format json_lines
+-    
++        Name       http
++        Match      *
++        Host       {{ .Values.fluentBit.restlogsHost }}
++        Port       {{ .Values.fluentBit.restlogsPort }}
++        tls        On
++        {{- if .Values.fluentBit.caCertSecret }}
++        tls.verify On
++        tls.ca_file /fluent-bit/tls/{{ .Values.fluentBit.caCertKey | default "ca.crt" }}
++        {{- else }}
++        tls.verify Off
++        {{- end }}
++        Format     json
++
+     [OUTPUT]
+         Name  stdout
+         Match *
+         Format json_lines
+-    
+-    [INPUT]
+-        Name              tail
+-        Tag               audit
+-        Path              ${FLUENTBIT_LOG_PATH}
+-        Parser            json_parser
+-        Mem_Buf_Limit     5MB
+-    
+-    [FILTER]
+-        Name           grep
+-        Match          audit
+-        Regex          type_id ^Audit$
+ 
+   parsers.conf: |
+     [PARSER]
+@@ -109,11 +126,13 @@ data:
+         Add            podname ${HOSTNAME}
+ 
+     [OUTPUT]
+-        Name  http
+-        Match *
+-        Host  {{ $.Values.fluentBit.restlogsHost }}
+-        Port  {{ $.Values.fluentBit.restlogsPort }} 
+-        Format json_lines
++        Name       http
++        Match      *
++        Host       {{ $.Values.fluentBit.restlogsHost }}
++        Port       {{ $.Values.fluentBit.restlogsPort }}
++        tls        On
++        tls.verify Off
++        Format     json_lines
+     
+     [OUTPUT]
+         Name  stdout
+diff --git a/helm-charts/ozone/templates/istio/serviceentry.yaml b/helm-charts/ozone/templates/istio/serviceentry.yaml
+index 1d0ed7a..00fbd35 100644
+--- a/helm-charts/ozone/templates/istio/serviceentry.yaml
++++ b/helm-charts/ozone/templates/istio/serviceentry.yaml
+@@ -42,8 +42,8 @@ spec:
+   {{- end }}
+   ports:
+     - number: {{ $ep.port }}
+-      name: {{ if $ep.isFluentBit }}https-fluentbit{{ else }}tcp-postgresql{{ end }}
+-      protocol: {{ if $ep.isFluentBit }}HTTPS{{ else }}TCP{{ end }}
++      name: {{ if $ep.isFluentBit }}tls-fluentbit{{ else }}tcp-postgresql{{ end }}
++      protocol: {{ if $ep.isFluentBit }}TLS{{ else }}TCP{{ end }}
+   {{- if $isIP }}
+   resolution: STATIC
+   location: MESH_EXTERNAL
+diff --git a/helm-charts/ozone/templates/om/statefulset.yaml b/helm-charts/ozone/templates/om/statefulset.yaml
+index 75d0e09..dcb2d0d 100644
+--- a/helm-charts/ozone/templates/om/statefulset.yaml
++++ b/helm-charts/ozone/templates/om/statefulset.yaml
+@@ -74,39 +74,7 @@ spec:
+       {{- end }}
+       containers:
+         {{- if $.Values.fluentBit.enabled }}
+-        - env:
+-            - name: FLUENTBIT_TAG
+-              value: om
+-            - name: FLUENTBIT_LOG_PATH
+-              value: /var/log/ozone/hadoop*.log
+-            - name: FLUENTBIT_PARSER
+-              value: om-parser
+-            - name: FLUENTBIT_DB_PATH
+-              value: /var/log/ozone/fluent-bit.db
+-          image: {{ $.Values.fluentBit.image }}
+-          imagePullPolicy: Always
+-          name: fluentbit
+-          ports:
+-            - containerPort: {{ $.Values.fluentBit.fluentMetricsPort }}
+-              name: metrics
+-              protocol: {{ $.Values.fluentBit.fluentMetricsProtocol }}
+-          resources:
+-            limits:
+-              cpu: {{ $.Values.fluentBit.resources.limits.cpu | default "20m" }}
+-              memory: {{ $.Values.fluentBit.resources.limits.memory | default "128Mi" }}
+-            requests:
+-              cpu: {{ $.Values.fluentBit.resources.requests.cpu | default "20m" }}
+-              memory: {{ $.Values.fluentBit.resources.requests.memory | default "128Mi" }}
+-          {{- include "ozone.containerSecurityContext" $ | nindent 10 }}
+-          terminationMessagePath: /dev/termination-log
+-          terminationMessagePolicy: File
+-          volumeMounts:
+-            - mountPath: /fluent-bit/etc/
+-              name: fluent-bit-om-config
+-            - mountPath: /tmp
+-              name: tmp
+-            - mountPath: /var/log/ozone
+-              name: logs-om
++        {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "om" "auditPath" "/var/log/ozone/om-audit.log") | nindent 8 }}
+         {{- end }}
+         - name: om
+           image: "{{ $.Values.global.image.registry }}/{{ tpl $.Values.om.image.repository $ }}:{{ tpl $.Values.om.image.tag $ }}"
+@@ -125,6 +93,12 @@ spec:
+               valueFrom:
+                 fieldRef:
+                   fieldPath: metadata.name
++            {{- if $.Values.fluentBit.enabled }}
++            - name: HADOOP_LOG_DIR
++              value: /var/log/ozone
++            - name: OZONE_OPTS
++              value: "-Dhadoop.log.dir=/var/log/ozone -Dhadoop.log.file=om.log -Dozone.audit.om.level=INFO"
++            {{- end }}
+             {{- if $.Values.ranger.enabled }}
+             - name: RANGER_ENABLED
+               value: "true"
+@@ -151,10 +125,9 @@ spec:
+               mountPath: /ozone/etc/hadoop
+             - name: data
+               mountPath: /data
+-            { { - if $.Values.fluentBit.enabled } }
+-            - name: logs-om
+-              mountPath: /var/log/ozone
+-            { { - end } }
++            {{- if $.Values.fluentBit.enabled }}
++            {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
++            {{- end }}
+             {{- if $.Values.ranger.enabled }}
+             {{- if $.Values.secman.enabled }}
+             - name: ranger-truststore-dir
+@@ -169,30 +142,10 @@ spec:
+           resources:
+             {{- toYaml . | nindent 12 }}
+           {{- end }}
+-        - name: cli
+-          image: "{{ $.Values.global.image.registry }}/{{ tpl $.Values.cli.image.repository $ }}:{{ tpl $.Values.cli.image.tag $ }}"
+-          {{- include "ozone.containerSecurityContext" $ | nindent 10 }}
+-          imagePullPolicy: {{ $.Values.global.image.pullPolicy }}
+-          command: [ "sleep" ]
+-          args: [ "infinity" ]
+-          volumeMounts:
+-            - name: config-volume
+-              mountPath: /ozone/etc/hadoop
+-            - name: logs-om
+-              mountPath: /var/log/ozone
+-          {{- with $.Values.cli.resources }}
+-          resources:
+-            {{- toYaml . | nindent 12 }}
+-          {{- end }}
++        {{- include "ozone.cli.container" $ | nindent 8 }}
+       volumes:
+         {{- if $.Values.fluentBit.enabled }}
+-        - name: fluent-bit-om-config
+-          configMap:
+-            name: fluent-bit-om-config
+-        - emptyDir: {}
+-          name: tmp
+-        - emptyDir: {}
+-          name: logs-om
++        {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
+         {{- end }}
+         - name: config-volume
+           configMap:
+diff --git a/helm-charts/ozone/templates/recon/deployment.yaml b/helm-charts/ozone/templates/recon/deployment.yaml
+index 3884638..e964258 100644
+--- a/helm-charts/ozone/templates/recon/deployment.yaml
++++ b/helm-charts/ozone/templates/recon/deployment.yaml
+@@ -31,6 +31,10 @@ spec:
+         {{- toYaml . | nindent 8 }}
+       {{- end }}
+       containers:
++        {{- if .Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "recon" "auditPath" "/var/log/ozone/recon-audit.log") | nindent 8 }}
++        {{- end }}
++        {{- include "ozone.cli.container" $ | nindent 8 }}
+         - name: recon
+           image: "{{ .Values.global.image.registry }}/{{ tpl .Values.recon.image.repository . }}:{{ tpl .Values.recon.image.tag . }}"
+           {{- include "ozone.containerSecurityContext" $ | nindent 10 }}
+@@ -40,9 +44,19 @@ spec:
+               name: ui
+           command: ["ozone"]
+           args: ["recon"]
++          {{- if .Values.fluentBit.enabled }}
++          env:
++            - name: HADOOP_LOG_DIR
++              value: /var/log/ozone
++            - name: OZONE_OPTS
++              value: "-Dhadoop.log.dir=/var/log/ozone -Dhadoop.log.file=recon.log"
++          {{- end }}
+           volumeMounts:
+             - name: config-volume
+               mountPath: /ozone/etc/hadoop
++            {{- if .Values.fluentBit.enabled }}
++            {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
++            {{- end }}
+           livenessProbe:
+             httpGet:
+               path: /
+@@ -60,6 +74,9 @@ spec:
+             {{- toYaml . | nindent 12 }}
+           {{- end }}
+       volumes:
++        {{- if .Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
++        {{- end }}
+         - name: config-volume
+           configMap:
+             name: {{ include "ozone.fullname" . }}-config
+diff --git a/helm-charts/ozone/templates/s3g/deployment.yaml b/helm-charts/ozone/templates/s3g/deployment.yaml
+index e67726a..edaba39 100644
+--- a/helm-charts/ozone/templates/s3g/deployment.yaml
++++ b/helm-charts/ozone/templates/s3g/deployment.yaml
+@@ -36,6 +36,10 @@ spec:
+         {{- toYaml . | nindent 8 }}
+       {{- end }}
+       containers:
++        {{- if .Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "s3g" "auditPath" "/var/log/ozone/s3g-audit.log") | nindent 8 }}
++        {{- end }}
++        {{- include "ozone.cli.container" $ | nindent 8 }}
+         - name: s3g
+           image: "{{ .Values.global.image.registry }}/{{ tpl .Values.s3g.image.repository . }}:{{ tpl .Values.s3g.image.tag . }}"
+           {{- include "ozone.containerSecurityContext" $ | nindent 10 }}
+@@ -45,9 +49,19 @@ spec:
+               name: s3
+           command: ["ozone"]
+           args: ["s3g"]
++          {{- if .Values.fluentBit.enabled }}
++          env:
++            - name: HADOOP_LOG_DIR
++              value: /var/log/ozone
++            - name: OZONE_OPTS
++              value: "-Dhadoop.log.dir=/var/log/ozone -Dhadoop.log.file=s3g.log -Dozone.audit.s3g.level=INFO -Dlog4j2.debug=true -Dorg.apache.logging.log4j.simplelog.StatusLogger.level=DEBUG"
++          {{- end }}
+           volumeMounts:
+             - name: config-volume
+               mountPath: /ozone/etc/hadoop
++            {{- if .Values.fluentBit.enabled }}
++            {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
++            {{- end }}
+           livenessProbe:
+             httpGet:
+               path: /
+@@ -65,6 +79,9 @@ spec:
+             {{- toYaml . | nindent 12 }}
+           {{- end }}
+       volumes:
++        {{- if .Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
++        {{- end }}
+         - name: config-volume
+           configMap:
+             name: {{ include "ozone.fullname" . }}-config
+diff --git a/helm-charts/ozone/templates/scm/statefulset.yaml b/helm-charts/ozone/templates/scm/statefulset.yaml
+index 8e3d6a9..f1e5b8c 100644
+--- a/helm-charts/ozone/templates/scm/statefulset.yaml
++++ b/helm-charts/ozone/templates/scm/statefulset.yaml
+@@ -59,6 +59,10 @@ spec:
+         {{- toYaml . | nindent 8 }}
+       {{- end }}
+       containers:
++        {{- if $.Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "scm" "auditPath" "/var/log/ozone/scm-audit.log") | nindent 8 }}
++        {{- end }}
++        {{- include "ozone.cli.container" $ | nindent 8 }}
+         - name: scm
+           image: "{{ $.Values.global.image.registry }}/{{ tpl $.Values.scm.image.repository $ }}:{{ tpl $.Values.scm.image.tag $ }}"
+           {{- include "ozone.containerSecurityContext" $ | nindent 10 }}
+@@ -82,16 +86,23 @@ spec:
+             - name: JAVA_OPTS
+               value: "-Djava.net.preferIPv4Stack=true"
+             - name: OZONE_OPTS
+-              value: "-Djava.net.preferIPv4Stack=true"
++              value: "-Djava.net.preferIPv4Stack=true{{- if $.Values.fluentBit.enabled }} -Dhadoop.log.dir=/var/log/ozone -Dhadoop.log.file=scm.log -Dozone.audit.scm.level=INFO{{- end }}"
+             - name: POD_NAME
+               valueFrom:
+                 fieldRef:
+                   fieldPath: metadata.name
++            {{- if $.Values.fluentBit.enabled }}
++            - name: HADOOP_LOG_DIR
++              value: /var/log/ozone
++            {{- end }}
+           volumeMounts:
+             - name: config-volume
+               mountPath: /ozone/etc/hadoop
+             - name: data
+               mountPath: /data
++            {{- if $.Values.fluentBit.enabled }}
++            {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
++            {{- end }}
+           livenessProbe:
+             tcpSocket:
+               port: {{ $.Values.scm.service.rpcPort }}
+@@ -102,6 +113,9 @@ spec:
+             {{- toYaml . | nindent 12 }}
+           {{- end }}
+       volumes:
++        {{- if $.Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
++        {{- end }}
+         - name: config-volume
+           configMap:
+             name: {{ include "ozone.fullname" $ }}-config
+diff --git a/helm-charts/ozone/values.yaml b/helm-charts/ozone/values.yaml
+index 51db584..14fb5d3 100644
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -450,6 +450,14 @@ ranger:
+ 
+ fluentBit:
+   enabled: true
++  appId: "SPD_OZONE-CI06618727-CI06618727-202410160000000000"
++  # Optional: name of a k8s Secret in the release namespace containing the
++  # collector's CA/server certificate (PEM). When set, fluent-bit mounts it
++  # at /fluent-bit/tls/ and uses it as tls.ca_file. Create the Secret like:
++  #   kubectl -n <ns> create secret generic fluentbit-restlogs-ca \
++  #     --from-file=ca.crt=./restlogs.crt
++  caCertSecret: ""
++  caCertKey: "ca.crt"
+ 
+ configuration:
+   files:
+@@ -626,39 +634,98 @@ configuration:
+ 
+     log4j2.xml: |-
+       <?xml version="1.0" encoding="UTF-8"?>
+-      <Configuration status="WARN">
++      <Configuration status="INFO">
+         <Properties>
+-          <Property name="hadoop.root.logger.level">${sys:hadoop.root.logger.level:-INFO}</Property>
+-          <Property name="hadoop.root.logger.appender">${sys:hadoop.root.logger.appender:-RFA}</Property>
+-          <Property name="hadoop.log.age">${sys:hadoop.log.age:-P60D}</Property>
+-          <Property name="hadoop.log.dir">${sys:hadoop.log.dir:-/var/log/ozone}</Property>
+-          <Property name="hadoop.log.file">${sys:hadoop.log.file:-hadoop.log}</Property>
+-          <Property name="hadoop.log.maxfilesize">${sys:hadoop.log.maxfilesize:-4096MB}</Property>
+-          <Property name="hadoop.log.maxbackupindex">${sys:hadoop.log.maxbackupindex:-100}</Property>
+-          <Property name="hadoop.log.maxdepth">RollingFile${sys:hadoop.log.maxdepth:-1}</Property>
++          <Property name="hadoop.log.age">P60D</Property>
++          <Property name="hadoop.log.dir">/var/log/ozone</Property>
++          <Property name="hadoop.log.file">hadoop.log</Property>
++          <Property name="hadoop.log.maxfilesize">4096MB</Property>
++          <Property name="hadoop.log.maxbackupindex">100</Property>
++          <Property name="hadoop.log.maxdepth">1</Property>
+         </Properties>
+         <Appenders>
+           <Console name="console" target="SYSTEM_OUT">
+             <PatternLayout pattern="%d{ISO8601} [%t] %p %c: %m%n"/>
+           </Console>
+-          <RollingFile name="RFA" fileName="${hadoop.log.dir}/${hadoop.log.file}"
+-                      filePattern="${hadoop.log.dir}/${hadoop.log.file}-%d{yyyy-MM-dd}-%i.gz">
++          <RollingFile name="RFA"
++                       fileName="/var/log/ozone/${sys:hadoop.log.file:-hadoop.log}"
++                       filePattern="/var/log/ozone/${sys:hadoop.log.file:-hadoop.log}.%d{yyyy-MM-dd}.%i.gz">
+             <PatternLayout pattern="%d{ISO8601} [%t] %p %c: %m%n"/>
+             <Policies>
+-              <SizeBasedTriggeringPolicy size="${hadoop.log.maxfilesize}"/>
++              <SizeBasedTriggeringPolicy size="256MB"/>
+               <TimeBasedTriggeringPolicy/>
+             </Policies>
+-            <DefaultRolloverStrategy max="${hadoop.log.maxbackupindex}">
+-              <Delete basePath="${hadoop.log.dir}" maxDepth="${hadoop.log.maxdepth}">
+-                <IfFileName glob="ozone-*.log-*.gz"/>
+-                <IfLastModified age="${hadoop.log.age}"/>
++            <DefaultRolloverStrategy max="10"/>
++          </RollingFile>
++          <RollingFile name="RollingFileOMAudit"
++                      fileName="${hadoop.log.dir}/om-audit.log"
++                      filePattern="${hadoop.log.dir}/om-audit-%d{yyyy-MM-dd-HH}-%i.log.gz"
++                      createOnDemand="true">
++            <PatternLayout pattern="%d{DEFAULT} | %-5level | %c{1} | %msg | %throwable{3}%n"/>
++            <Policies>
++              <TimeBasedTriggeringPolicy interval="86400"/>
++              <SizeBasedTriggeringPolicy size="64MB"/>
++            </Policies>
++            <DefaultRolloverStrategy max="30">
++              <Delete basePath="${hadoop.log.dir}" maxDepth="1">
++                <IfFileName glob="om-audit-*.log.gz"/>
++                <IfLastModified age="30d"/>
++              </Delete>
++            </DefaultRolloverStrategy>
++          </RollingFile>
++          <RollingFile name="RollingFileSCMAudit"
++                      fileName="${hadoop.log.dir}/scm-audit.log"
++                      filePattern="${hadoop.log.dir}/scm-audit-%d{yyyy-MM-dd-HH}-%i.log.gz"
++                      createOnDemand="true">
++            <PatternLayout pattern="%d{DEFAULT} | %-5level | %c{1} | %msg | %throwable{3}%n"/>
++            <Policies>
++              <TimeBasedTriggeringPolicy interval="86400"/>
++              <SizeBasedTriggeringPolicy size="64MB"/>
++            </Policies>
++            <DefaultRolloverStrategy max="30">
++              <Delete basePath="${hadoop.log.dir}" maxDepth="1">
++                <IfFileName glob="scm-audit-*.log.gz"/>
++                <IfLastModified age="30d"/>
++              </Delete>
++            </DefaultRolloverStrategy>
++          </RollingFile>
++          <RollingFile name="RollingFileDNAudit"
++                      fileName="${hadoop.log.dir}/dn-audit.log"
++                      filePattern="${hadoop.log.dir}/dn-audit-%d{yyyy-MM-dd-HH}-%i.log.gz"
++                      createOnDemand="true">
++            <PatternLayout pattern="%d{DEFAULT} | %-5level | %c{1} | %msg | %throwable{3}%n"/>
++            <Policies>
++              <TimeBasedTriggeringPolicy interval="86400"/>
++              <SizeBasedTriggeringPolicy size="64MB"/>
++            </Policies>
++            <DefaultRolloverStrategy max="30">
++              <Delete basePath="${hadoop.log.dir}" maxDepth="1">
++                <IfFileName glob="dn-audit-*.log.gz"/>
++                <IfLastModified age="30d"/>
++              </Delete>
++            </DefaultRolloverStrategy>
++          </RollingFile>
++          <RollingFile name="RollingFileS3GAudit"
++                      fileName="${hadoop.log.dir}/s3g-audit.log"
++                      filePattern="${hadoop.log.dir}/s3g-audit-%d{yyyy-MM-dd-HH}-%i.log.gz"
++                      createOnDemand="true">
++            <PatternLayout pattern="%d{DEFAULT} | %-5level | %c{1} | %msg | %throwable{3}%n"/>
++            <Policies>
++              <TimeBasedTriggeringPolicy interval="86400"/>
++              <SizeBasedTriggeringPolicy size="64MB"/>
++            </Policies>
++            <DefaultRolloverStrategy max="30">
++              <Delete basePath="${hadoop.log.dir}" maxDepth="1">
++                <IfFileName glob="s3g-audit-*.log.gz"/>
++                <IfLastModified age="30d"/>
+               </Delete>
+             </DefaultRolloverStrategy>
+           </RollingFile>
+         </Appenders>
+         <Loggers>
+           <Root level="INFO">
+-            <AppenderRef ref="${hadoop.root.logger.appender}"/>
++            <AppenderRef ref="console"/>
++            <AppenderRef ref="RFA"/>
+           </Root>
+           <Logger name="com.amazonaws.http.AmazonHttpClient" level="ERROR"/>
+           <Logger name="org.apache.commons.beanutils" level="WARN"/>
+@@ -666,53 +733,23 @@ configuration:
+           <Logger name="org.apache.ratis.conf.ConfUtils" level="WARN"/>
+           <Logger name="org.apache.hadoop.security.ShellBasedUnixGroupsMapping" level="ERROR"/>
+           <Logger name="org.apache.ratis.grpc.client.GrpcClientProtocolClient" level="WARN"/>
++          <Logger name="xaaudit" level="INFO" additivity="false">
++            <AppenderRef ref="console"/>
++          </Logger>
++          <AsyncLogger name="OMAudit" level="${sys:ozone.audit.om.level:-OFF}" includeLocation="true" additivity="false">
++            <AppenderRef ref="RollingFileOMAudit"/>
++          </AsyncLogger>
++          <AsyncLogger name="SCMAudit" level="${sys:ozone.audit.scm.level:-OFF}" includeLocation="true" additivity="false">
++            <AppenderRef ref="RollingFileSCMAudit"/>
++          </AsyncLogger>
++          <AsyncLogger name="DNAudit" level="${sys:ozone.audit.dn.level:-OFF}" includeLocation="true" additivity="false">
++            <AppenderRef ref="RollingFileDNAudit"/>
++          </AsyncLogger>
++          <AsyncLogger name="S3GAudit" level="${sys:ozone.audit.s3g.level:-OFF}" includeLocation="true" additivity="false">
++            <AppenderRef ref="RollingFileS3GAudit"/>
++          </AsyncLogger>
+         </Loggers>
+       </Configuration>
+-    
+-    om-audit-log4j2.xml: |-
+-      <?xml version="1.0" encoding="UTF-8"?>
+-      <Configuration status="WARN">
+-          <Properties>
+-              <Property name="hadoop.log.dir">${sys:hadoop.log.dir:-/var/log/ozone}</Property>
+-              <Property name="hostName">${hostName}</Property>
+-          </Properties>
+-
+-          <Appenders>
+-              <!-- Uncomment following section to enable logging to console appender also
+-              <Console name="STDOUT" target="SYSTEM_OUT">
+-                  <PatternLayout pattern="%d{DEFAULT} | %-5level | %c{1} | %msg | %throwable{3} %n"/>
+-              </Console>
+-              -->
+-
+-              <RollingFile name="RollingFileOMAudit" fileName="${hadoop.log.dir}/om-audit-${hostName}.log" filePattern="${hadoop.log.dir}/om-audit-${hostName}-%d{yyyy-MM-dd-HH-mm-ss}-%i.log.gz">
+-                  <PatternLayout pattern="%d{DEFAULT} | %-5level | %c{1} | %msg | %throwable{3} %n"/>
+-                  <Policies>
+-                      <TimeBasedTriggeringPolicy interval="86400"/>
+-                      <SizeBasedTriggeringPolicy size="64MB"/>
+-                  </Policies>
+-                  <DefaultRolloverStrategy>
+-                      <Delete basePath="${hadoop.log.dir}" maxDepth="1">
+-                          <IfFileName glob="om-audit-*.log.gz"/>
+-                          <IfLastModified age="30d"/>
+-                      </Delete>
+-                  </DefaultRolloverStrategy>
+-                  <Filters>
+-                      <MarkerFilter marker="READ" onMatch="NEUTRAL" onMismatch="NEUTRAL"/>
+-                      <MarkerFilter marker="WRITE" onMatch="NEUTRAL" onMismatch="NEUTRAL"/>
+-                  </Filters>
+-              </RollingFile>
+-          </Appenders>
+-
+-          <Loggers>
+-              <AsyncLogger name="OMAudit" level="INFO" includeLocation="true" additivity="false">
+-                  <AppenderRef ref="RollingFileOMAudit"/>
+-
+-                  <!-- Uncomment following section to enable logging to console appender also
+-                  <AppenderRef ref="STDOUT"/>
+-                  -->
+-              </AsyncLogger>
+-          </Loggers>
+-      </Configuration>
+ 
+     log4j2-cli.xml: |-
+       <?xml version="1.0" encoding="UTF-8"?>
