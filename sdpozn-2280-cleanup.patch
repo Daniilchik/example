@@ -1,0 +1,32 @@
+diff --git a/helm-charts/ozone/templates/_helpers.tpl b/helm-charts/ozone/templates/_helpers.tpl
+index e77c4c4..9f93c3b 100644
+--- a/helm-charts/ozone/templates/_helpers.tpl
++++ b/helm-charts/ozone/templates/_helpers.tpl
+@@ -327,23 +327,11 @@ those files from its own mount of the same emptyDir.
+ {{- end -}}
+ 
+ {{/*
+-Log4j2 sys-prop suffix for OZONE_OPTS. Builds the comma-separated
+-log4j.configurationFile list (main + per-component audit) and enables the
+-async logger context selector required by upstream Ozone.
++Log4j2 sys-prop suffix for OZONE_OPTS: builds the comma-separated
++log4j.configurationFile list (main + per-component audit) and enables
++the async logger context selector required by upstream Ozone.
++Recon has no audit logger, so its argument list omits the audit config.
+ */}}
+-{{/*
+-Egress host entry for the fluent-bit collector.
+-Used inside Sidecar.egress[0].hosts to allow Envoy to send traffic
+-to the external collector when istio is enabled.
+-Usage:
+-  {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
+-*/}}
+-{{- define "ozone.fluentbit.istioEgress" -}}
+-{{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost -}}
+-- "./{{ .Values.fluentBit.restlogsHost }}"
+-{{- end -}}
+-{{- end -}}
+-
+ {{- define "ozone.fluentbit.log4jOpts" -}}
+ {{- $confDir := "/ozone/etc/hadoop" -}}
+ {{- $hasAudit := has .component (list "om" "scm" "datanode" "s3g") -}}
