@@ -1,0 +1,187 @@
+--- a/helm-charts/ozone/templates/_helpers.tpl
++++ b/helm-charts/ozone/templates/_helpers.tpl
+@@ -244,19 +244,9 @@
+ {{- end -}}
+ 
+ {{/*
+-Fluent-bit sidecar container.
+-
+-Tails <logDir>/<component>.log (and <logDir>/<component>-audit.log when
+-the component has an audit logger) from the shared emptyDir and ships
+-them to the external collector.
+-
+-Args (dict):
+-  ctx        — root context ($)
+-  component  — short component name (om, scm, datanode, s3g, recon).
+-               File names are derived from the component map below.
+-
+-Usage:
+-  {{- include "ozone.fluentbit.container" (dict "ctx" $ "component" "om") | nindent 8 }}
++Fluent-bit sidecar container. Tails <logDir>/<component>.log
++(and <logDir>/<component>-audit.log when component has an audit logger)
++from the shared emptyDir and ships them to the external collector.
+ */}}
+ {{- define "ozone.fluentbit.container" -}}
+ {{- $ctx := .ctx -}}
+@@ -264,8 +254,8 @@
+ {{- $component := .component -}}
+ {{- $hasAudit := has $component (list "om" "scm" "datanode" "s3g") -}}
+ - name: fluent-bit
+-  image: {{ $ctx.Values.fluentBit.image }}
+-  imagePullPolicy: {{ $ctx.Values.fluentBit.imagePullPolicy | default "IfNotPresent" }}
++  image: "{{ $ctx.Values.fluentBit.image.registry }}/{{ tpl $ctx.Values.fluentBit.image.repository $ctx }}:{{ tpl $ctx.Values.fluentBit.image.tag $ctx }}"
++  imagePullPolicy: Always
+   env:
+     - name: FLUENTBIT_COMPONENT
+       value: {{ $component | quote }}
+@@ -310,8 +300,6 @@
+ 
+ {{/*
+ Volumes required by fluent-bit sidecar + the shared log dir.
+-Usage:
+-  {{- include "ozone.fluentbit.volumes" $ | nindent 8 }}
+ */}}
+ {{- define "ozone.fluentbit.volumes" -}}
+ - name: fluent-bit-config
+@@ -332,8 +320,6 @@
+ VolumeMount for the main Ozone container, pointing at the shared log dir.
+ The main container must write to fluentBit.logDir so fluent-bit can tail
+ those files from its own mount of the same emptyDir.
+-Usage:
+-  {{- include "ozone.fluentbit.logsMount" $ | nindent 12 }}
+ */}}
+ {{- define "ozone.fluentbit.logsMount" -}}
+ - name: ozone-logs
+@@ -341,31 +327,10 @@
+ {{- end -}}
+ 
+ {{/*
+-Egress host entry for the fluent-bit collector.
+-Used inside Sidecar.egress[0].hosts to allow Envoy to send traffic
+-to the external collector when istio is enabled.
+-Usage:
+-  {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
+-*/}}
+-{{- define "ozone.fluentbit.istioEgress" -}}
+-{{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost -}}
+-- "./{{ .Values.fluentBit.restlogsHost }}"
+-{{- end -}}
+-{{- end -}}
+-
+-{{/*
+-Log4j2 sys-prop suffix for OZONE_OPTS. Builds the comma-separated
+-log4j.configurationFile list (main + per-component audit) and enables the
+-async logger context selector required by upstream Ozone.
+-
++Log4j2 sys-prop suffix for OZONE_OPTS: builds the comma-separated
++log4j.configurationFile list (main + per-component audit) and enables
++the async logger context selector required by upstream Ozone.
+ Recon has no audit logger, so its argument list omits the audit config.
+-
+-Args (dict):
+-  ctx        — root context ($)
+-  component  — short component name (om, scm, datanode, s3g, recon)
+-
+-Usage:
+-  -Dhadoop.log.dir=... {{ include "ozone.fluentbit.log4jOpts" (dict "ctx" $ "component" "om") }}
+ */}}
+ {{- define "ozone.fluentbit.log4jOpts" -}}
+ {{- $confDir := "/ozone/etc/hadoop" -}}
+--- a/helm-charts/ozone/templates/istio/sidecar.yaml
++++ b/helm-charts/ozone/templates/istio/sidecar.yaml
+@@ -48,7 +48,9 @@
+         {{- if .Values.global.security.kerberos.enabled }}
+         - "./{{ required "global.security.kerberos.kdc.hostname is required when kerberos is enabled" .Values.global.security.kerberos.kdc.hostname }}"
+         {{- end}}
+-        {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
++        {{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost }}
++        - "./{{ .Values.fluentBit.restlogsHost }}"
++        {{- end }}
+ {{- end }}
+ 
+ {{- if .Values.om.enabled }}
+@@ -85,7 +87,9 @@
+         {{- if .Values.global.security.kerberos.enabled }}
+         - "./{{ required "global.security.kerberos.kdc.hostname is required when kerberos is enabled" .Values.global.security.kerberos.kdc.hostname }}"
+         {{- end}}
+-        {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
++        {{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost }}
++        - "./{{ .Values.fluentBit.restlogsHost }}"
++        {{- end }}
+ {{- end }}
+ 
+ {{- if .Values.datanode.enabled }}
+@@ -118,7 +122,9 @@
+         {{- if .Values.global.security.kerberos.enabled }}
+         - "./{{ required "global.security.kerberos.kdc.hostname is required when kerberos is enabled" .Values.global.security.kerberos.kdc.hostname }}"
+         {{- end}}
+-        {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
++        {{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost }}
++        - "./{{ .Values.fluentBit.restlogsHost }}"
++        {{- end }}
+ {{- end }}
+ 
+ {{- if .Values.recon.enabled }}
+@@ -148,7 +154,9 @@
+         {{- if .Values.global.security.kerberos.enabled }}
+         - "./{{ required "global.security.kerberos.kdc.hostname is required when kerberos is enabled" .Values.global.security.kerberos.kdc.hostname }}"
+         {{- end}}
+-        {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
++        {{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost }}
++        - "./{{ .Values.fluentBit.restlogsHost }}"
++        {{- end }}
+ {{- end }}
+ 
+ {{- if .Values.s3g.enabled }}
+@@ -176,7 +184,9 @@
+         {{- if .Values.global.security.kerberos.enabled }}
+         - "./{{ required "global.security.kerberos.kdc.hostname is required when kerberos is enabled" .Values.global.security.kerberos.kdc.hostname }}"
+         {{- end}}
+-        {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
++        {{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost }}
++        - "./{{ .Values.fluentBit.restlogsHost }}"
++        {{- end }}
+ {{- end }}
+ 
+ {{- if .Values.cli.enabled }}
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -106,8 +106,10 @@
+ # Override image/appId/restlogsHost per environment in values-<env>.yaml.
+ fluentBit:
+   enabled: false
+-  image: ""
+-  imagePullPolicy: Always
++  image:
++    registry: ""
++    repository: ""
++    tag: ""
+   appId: ""
+   # External collector endpoint
+   restlogsHost: ""
+--- a/values/values-dev.yaml
++++ b/values/values-dev.yaml
+@@ -202,6 +202,9 @@
+ 
+ fluentBit:
+   enabled: true
+-  image: docker-dev.registry-ci.delta.sbrf.ru/ci03978861/ci03978861/fluent-bit@sha256:e2c58d93e045585c9bb03b429cde86d491e808bf381a9b2c8398db990dfcdabf
++  image:
++    registry: docker-dev.registry-ci.delta.sbrf.ru/ci03978861/ci03978861
++    repository: fluent-bit@sha256
++    tag: e2c58d93e045585c9bb03b429cde86d491e808bf381a9b2c8398db990dfcdabf
+   appId: "SPD_OZONE-CI06618727-CI06618727-202410160000000000"
+   restlogsHost: tvlss-log000003.dev.df.sbrf.ru
+--- a/values/values-ift.yaml
++++ b/values/values-ift.yaml
+@@ -152,6 +152,9 @@
+ 
+ fluentBit:
+   enabled: true
+-  image: docker-release.registry-ci.delta.sbrf.ru/ci03978861/ci03978861/fluent-bit@sha256:e2c58d93e045585c9bb03b429cde86d491e808bf381a9b2c8398db990dfcdabf
++  image:
++    registry: docker-release.registry-ci.delta.sbrf.ru/ci03978861/ci03978861
++    repository: fluent-bit@sha256
++    tag: e2c58d93e045585c9bb03b429cde86d491e808bf381a9b2c8398db990dfcdabf
+   appId: "SPD_OZONE-CI06618727-CI06618727-202410160000000000"
+   restlogsHost: tvlss-log000003.ift.df.sbrf.ru
