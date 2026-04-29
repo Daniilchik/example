@@ -1,0 +1,125 @@
+--- a/docker/hive-entrypoint.go
++++ b/docker/hive-entrypoint.go
+@@ -2,11 +2,13 @@ package main
+
+ import (
+ 	"encoding/base64"
++	"encoding/xml"
+ 	"fmt"
+ 	"net"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
++	"regexp"
+ 	"strings"
+ 	"syscall"
+ 	"time"
+@@ -17,11 +19,13 @@ const (
+ 	hadoopHome = "/opt/hadoop"
+ 	javaHome   = "/usr/lib/jvm/jre-1.8.0-openjdk"
+
+-	maxSchemaRetries = 3
+-	retryInterval    = 5 * time.Second
++	dbWaitTimeout  = 2 * time.Minute
++	dbWaitInterval = 2 * time.Second
+
+ 	metastoreMainClass  = "org.apache.hadoop.hive.metastore.HiveMetaStore"
+ 	schemaToolMainClass = "org.apache.hive.beeline.HiveSchemaTool"
++
++	jdbcURLProperty = "javax.jdo.option.ConnectionURL"
+ )
+
+ // buildClasspath собирает classpath: HIVE_CONF_DIR → /opt/hadoop/*.jar → /opt/hive/lib/*.jar
+@@ -205,33 +209,68 @@ func waitFor(addr string, timeout, interval time.Duration) error {
+ 	}
+ }
+
+-func schemaInfo(classpath string, env []string) error {
+-	return runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-info"}, env)
++// findJdbcEndpoint читает hive-site.xml и возвращает host:port из ConnectionURL.
++func findJdbcEndpoint() (string, error) {
++	confDir := os.Getenv("HIVE_CONF_DIR")
++	if confDir == "" {
++		confDir = hiveHome + "/conf"
++	}
++	path := filepath.Join(confDir, "hive-site.xml")
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return "", fmt.Errorf("read %s: %v", path, err)
++	}
++	type prop struct {
++		Name  string `xml:"name"`
++		Value string `xml:"value"`
++	}
++	type config struct {
++		Properties []prop `xml:"property"`
++	}
++	var c config
++	if err := xml.Unmarshal(data, &c); err != nil {
++		return "", fmt.Errorf("parse %s: %v", path, err)
++	}
++	var jdbcURL string
++	for _, p := range c.Properties {
++		if p.Name == jdbcURLProperty {
++			jdbcURL = strings.TrimSpace(p.Value)
++			break
++		}
++	}
++	if jdbcURL == "" {
++		return "", fmt.Errorf("%s not found in hive-site.xml", jdbcURLProperty)
++	}
++	// jdbc:postgresql://host:port/db?...
++	re := regexp.MustCompile(`^jdbc:[^:]+://([^/?]+)`)
++	m := re.FindStringSubmatch(jdbcURL)
++	if len(m) < 2 {
++		return "", fmt.Errorf("cannot parse host:port from %s", jdbcURL)
++	}
++	hp := m[1]
++	if !strings.Contains(hp, ":") {
++		hp += ":5432"
++	}
++	return hp, nil
+ }
+
+-func schemaInit(classpath string, env []string) error {
+-	return runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-initSchema"}, env)
+-}
+-
++// initSchema ждёт БД (TCP), затем один раз проверяет схему. Если отсутствует — инициализирует.
+ func initSchema(classpath string, env []string) error {
+-	for i := 1; i <= maxSchemaRetries; i++ {
+-		if err := schemaInfo(classpath, env); err == nil {
+-			logf("Schema exists.")
+-			return nil
+-		}
+-
+-		if i == maxSchemaRetries {
+-			logf("Schema check failed after %d attempts, attempting initSchema...", maxSchemaRetries)
+-			if err := schemaInit(classpath, env); err != nil {
+-				return fmt.Errorf("schema initialization failed: %v", err)
+-			}
+-			logf("Schema initialized successfully.")
+-			return nil
+-		}
+-
+-		logf("Attempt %d/%d: schema check failed, retrying in %s...", i, maxSchemaRetries, retryInterval)
+-		time.Sleep(retryInterval)
++	endpoint, err := findJdbcEndpoint()
++	if err != nil {
++		return fmt.Errorf("resolve DB endpoint: %v", err)
+ 	}
++	if err := waitFor(endpoint, dbWaitTimeout, dbWaitInterval); err != nil {
++		return err
++	}
++	logf("Database is reachable, checking schema...")
++	if err := runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-info"}, env); err == nil {
++		logf("Schema exists.")
++		return nil
++	}
++	logf("Schema not found, running initSchema...")
++	if err := runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-initSchema"}, env); err != nil {
++		return fmt.Errorf("schema initialization failed: %v", err)
++	}
++	logf("Schema initialized successfully.")
+ 	return nil
+ }
