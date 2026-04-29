@@ -1,0 +1,174 @@
+--- a/docker/hive-entrypoint.go
++++ b/docker/hive-entrypoint.go
+@@ -1,12 +1,13 @@
+ package main
+
+ import (
+-	"bufio"
++	"encoding/xml"
+ 	"fmt"
+ 	"net"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
++	"regexp"
+ 	"strings"
+ 	"syscall"
+ 	"time"
+@@ -17,11 +18,13 @@
+ 	hadoopHome = "/opt/hadoop"
+ 	javaHome   = "/usr/lib/jvm/jre-1.8.0-openjdk"
+
+-	maxSchemaRetries = 30
+-	retryInterval    = 5 * time.Second
++	dbWaitTimeout  = 2 * time.Minute
++	dbWaitInterval = 2 * time.Second
+
+ 	metastoreMainClass  = "org.apache.hadoop.hive.metastore.HiveMetaStore"
+ 	schemaToolMainClass = "org.apache.hive.beeline.HiveSchemaTool"
++
++	jdbcURLProperty = "javax.jdo.option.ConnectionURL"
+ )
+
+ // buildClasspath собирает classpath для Hive Metastore.
+@@ -159,49 +162,80 @@
+ 	}
+ }
+
+-// schemaInfo проверяет наличие схемы Hive Metastore в БД.
+-func schemaInfo(classpath string, env []string) error {
+-	return runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-info"}, env)
++// findJdbcEndpoint читает hive-site.xml и возвращает host:port из ConnectionURL.
++func findJdbcEndpoint() (string, error) {
++	confDir := os.Getenv("HIVE_CONF_DIR")
++	if confDir == "" {
++		confDir = hiveHome + "/conf"
++	}
++	path := filepath.Join(confDir, "hive-site.xml")
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return "", fmt.Errorf("read %s: %v", path, err)
++	}
++	type prop struct {
++		Name  string `xml:"name"`
++		Value string `xml:"value"`
++	}
++	type config struct {
++		Properties []prop `xml:"property"`
++	}
++	var c config
++	if err := xml.Unmarshal(data, &c); err != nil {
++		return "", fmt.Errorf("parse %s: %v", path, err)
++	}
++	var jdbcURL string
++	for _, p := range c.Properties {
++		if p.Name == jdbcURLProperty {
++			jdbcURL = strings.TrimSpace(p.Value)
++			break
++		}
++	}
++	if jdbcURL == "" {
++		return "", fmt.Errorf("%s not found in hive-site.xml", jdbcURLProperty)
++	}
++	// jdbc:postgresql://host:port/db?...
++	re := regexp.MustCompile(`^jdbc:[^:]+://([^/?]+)`)
++	m := re.FindStringSubmatch(jdbcURL)
++	if len(m) < 2 {
++		return "", fmt.Errorf("cannot parse host:port from %s", jdbcURL)
++	}
++	hp := m[1]
++	if !strings.Contains(hp, ":") {
++		hp += ":5432"
++	}
++	return hp, nil
+ }
+
+-// schemaInit инициализирует схему Hive Metastore.
+-func schemaInit(classpath string, env []string) error {
+-	return runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-initSchema"}, env)
+-}
+-
+-// initSchema ждёт БД и проверяет/инициализирует схему.
++// initSchema ждёт БД (TCP), затем один раз проверяет схему. Если отсутствует — инициализирует.
+ func initSchema(classpath string, env []string) error {
+-	for i := 1; i <= maxSchemaRetries; i++ {
+-		// Проверяем: БД доступна и схема существует
+-		if err := schemaInfo(classpath, env); err == nil {
+-			logf("Schema exists.")
+-			return nil
+-		}
+-
+-		if i == maxSchemaRetries {
+-			// Последняя попытка: может БД доступна, но схемы нет
+-			logf("Schema check failed after %d attempts, attempting initSchema...", maxSchemaRetries)
+-			if err := schemaInit(classpath, env); err != nil {
+-				return fmt.Errorf("schema initialization failed: %v", err)
+-			}
+-			logf("Schema initialized successfully.")
+-			return nil
+-		}
+-
+-		logf("Attempt %d/%d: schema check failed, retrying in %s...", i, maxSchemaRetries, retryInterval)
+-		time.Sleep(retryInterval)
++	endpoint, err := findJdbcEndpoint()
++	if err != nil {
++		return fmt.Errorf("resolve DB endpoint: %v", err)
+ 	}
++	if err := waitFor(endpoint, dbWaitTimeout, dbWaitInterval); err != nil {
++		return err
++	}
++	logf("Database is reachable, checking schema...")
++	if err := runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-info"}, env); err == nil {
++		logf("Schema exists.")
++		return nil
++	}
++	logf("Schema not found, running initSchema...")
++	if err := runJava(schemaToolMainClass, classpath, []string{"-dbType", "postgres", "-initSchema"}, env); err != nil {
++		return fmt.Errorf("schema initialization failed: %v", err)
++	}
++	logf("Schema initialized successfully.")
+ 	return nil
+ }
+
+ func printUsage() {
+ 	fmt.Fprintln(os.Stderr, "Usage: hive-entrypoint <command> [args...]")
+ 	fmt.Fprintln(os.Stderr, "Commands:")
+-	fmt.Fprintln(os.Stderr, "  metastore              Start Hive Metastore Server")
+-	fmt.Fprintln(os.Stderr, "  metastore --init-schema Start with schema init/check, then start metastore")
+-	fmt.Fprintln(os.Stderr, "  schematool [args...]    Run Hive SchemaToolMain")
+-	fmt.Fprintln(os.Stderr, "  wait-for <host:port>   Wait for TCP endpoint")
+-	fmt.Fprintln(os.Stderr, "  idle                   Block forever (debug)")
++	fmt.Fprintln(os.Stderr, "  metastore               Start Hive Metastore Server")
++	fmt.Fprintln(os.Stderr, "  metastore --init-schema Wait for DB, check schema, init if missing, then start metastore")
++	fmt.Fprintln(os.Stderr, "  schematool [args...]    Run Hive SchemaTool")
++	fmt.Fprintln(os.Stderr, "  idle                    Block forever (debug)")
+ }
+
+ func main() {
+@@ -219,26 +253,6 @@
+ 	case "idle":
+ 		select {}
+
+-	case "wait-for":
+-		if len(os.Args) < 3 {
+-			fmt.Fprintln(os.Stderr, "Usage: hive-entrypoint wait-for <host:port> [--timeout=120s]")
+-			os.Exit(1)
+-		}
+-		addr := os.Args[2]
+-		timeout := 120 * time.Second
+-		for _, arg := range os.Args[3:] {
+-			if strings.HasPrefix(arg, "--timeout=") {
+-				val := strings.TrimPrefix(arg, "--timeout=")
+-				if d, err := time.ParseDuration(val); err == nil {
+-					timeout = d
+-				}
+-			}
+-		}
+-		if err := waitFor(addr, timeout, 2*time.Second); err != nil {
+-			fmt.Fprintln(os.Stderr, err)
+-			os.Exit(1)
+-		}
+-
+ 	case "schematool":
+ 		args := os.Args[2:]
+ 		if err := runJava(schemaToolMainClass, classpath, args, env); err != nil {
