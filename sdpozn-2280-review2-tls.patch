@@ -1,0 +1,145 @@
+diff --git a/helm-charts/ozone/templates/_helpers.tpl b/helm-charts/ozone/templates/_helpers.tpl
+index e77c4c4..5531279 100644
+--- a/helm-charts/ozone/templates/_helpers.tpl
++++ b/helm-charts/ozone/templates/_helpers.tpl
+@@ -291,11 +291,6 @@ from the shared emptyDir and ships them to the external collector.
+       mountPath: /tmp
+     - name: ozone-logs
+       mountPath: {{ $logDir }}
+-    {{- if $ctx.Values.fluentBit.caCertSecret }}
+-    - name: fluent-bit-ca
+-      mountPath: /fluent-bit/tls
+-      readOnly: true
+-    {{- end }}
+ {{- end -}}
+ 
+ {{/*
+@@ -309,11 +304,6 @@ Volumes required by fluent-bit sidecar + the shared log dir.
+   emptyDir: {}
+ - name: ozone-logs
+   emptyDir: {}
+-{{- if .Values.fluentBit.caCertSecret }}
+-- name: fluent-bit-ca
+-  secret:
+-    secretName: {{ .Values.fluentBit.caCertSecret | quote }}
+-{{- end }}
+ {{- end -}}
+ 
+ {{/*
+@@ -327,23 +317,11 @@ those files from its own mount of the same emptyDir.
+ {{- end -}}
+ 
+ {{/*
+-Log4j2 sys-prop suffix for OZONE_OPTS. Builds the comma-separated
+-log4j.configurationFile list (main + per-component audit) and enables the
+-async logger context selector required by upstream Ozone.
+-*/}}
+-{{/*
+-Egress host entry for the fluent-bit collector.
+-Used inside Sidecar.egress[0].hosts to allow Envoy to send traffic
+-to the external collector when istio is enabled.
+-Usage:
+-  {{- include "ozone.fluentbit.istioEgress" . | nindent 8 }}
++Log4j2 sys-prop suffix for OZONE_OPTS: builds the comma-separated
++log4j.configurationFile list (main + per-component audit) and enables
++the async logger context selector required by upstream Ozone.
++Recon has no audit logger, so its argument list omits the audit config.
+ */}}
+-{{- define "ozone.fluentbit.istioEgress" -}}
+-{{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost -}}
+-- "./{{ .Values.fluentBit.restlogsHost }}"
+-{{- end -}}
+-{{- end -}}
+-
+ {{- define "ozone.fluentbit.log4jOpts" -}}
+ {{- $confDir := "/ozone/etc/hadoop" -}}
+ {{- $hasAudit := has .component (list "om" "scm" "datanode" "s3g") -}}
+diff --git a/helm-charts/ozone/templates/fluentbit/configmap.yaml b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+index 3affc79..0e6576b 100644
+--- a/helm-charts/ozone/templates/fluentbit/configmap.yaml
++++ b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+@@ -64,13 +64,6 @@ data:
+         Match      *
+         Host       {{ .Values.fluentBit.restlogsHost }}
+         Port       {{ .Values.fluentBit.restlogsPort }}
+-        tls        On
+-        {{- if .Values.fluentBit.caCertSecret }}
+-        tls.verify On
+-        tls.ca_file /fluent-bit/tls/{{ .Values.fluentBit.caCertKey | default "ca.crt" }}
+-        {{- else }}
+-        tls.verify Off
+-        {{- end }}
+         Format     json
+ 
+   enrich.lua: |
+diff --git a/helm-charts/ozone/templates/istio/serviceentry.yaml b/helm-charts/ozone/templates/istio/serviceentry.yaml
+index ce5357d..55076cb 100644
+--- a/helm-charts/ozone/templates/istio/serviceentry.yaml
++++ b/helm-charts/ozone/templates/istio/serviceentry.yaml
+@@ -150,9 +150,9 @@ spec:
+   hosts:
+     - {{ .Values.fluentBit.restlogsHost | quote }}
+   ports:
+-    - name: tls-fluentbit-restlogs
++    - name: https-fluentbit-restlogs
+       number: {{ .Values.fluentBit.restlogsPort }}
+-      protocol: TLS
++      protocol: HTTPS
+   resolution: DNS
+   location: MESH_EXTERNAL
+ ---
+@@ -167,7 +167,8 @@ spec:
+   host: {{ .Values.fluentBit.restlogsHost | quote }}
+   trafficPolicy:
+     tls:
+-      mode: DISABLE
++      mode: SIMPLE
++      insecureSkipVerify: true
+ {{- end }}
+ ---
+ apiVersion: networking.istio.io/v1beta1
+diff --git a/helm-charts/ozone/values.yaml b/helm-charts/ozone/values.yaml
+index 70f2b69..be1153c 100644
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -117,10 +117,6 @@ fluentBit:
+   # Local fluent-bit metrics endpoint inside the pod
+   fluentMetricsPort: 2200
+   fluentMetricsProtocol: TCP
+-  # Optional collector CA cert: name of a k8s Secret containing the PEM under caCertKey.
+-  # When unset, TLS is on but verification is off (suitable for dev only).
+-  caCertSecret: ""
+-  caCertKey: ca.crt
+   # Where Ozone services write their log files. Same path is mounted into
+   # the fluent-bit sidecar so it can tail them.
+   logDir: /var/log/ozone
+diff --git a/values/values-dev.yaml b/values/values-dev.yaml
+index a181538..75dbfe5 100644
+--- a/values/values-dev.yaml
++++ b/values/values-dev.yaml
+@@ -203,8 +203,8 @@ prometheus:
+ fluentBit:
+   enabled: true
+   image:
+-    registry: docker-dev.registry-ci.delta.sbrf.ru/ci03978861/ci03978861
+-    repository: fluent-bit@sha256
++    registry: docker-dev.registry-ci.delta.sbrf.ru
++    repository: ci03978861/ci03978861/fluent-bit@sha256
+     tag: e2c58d93e045585c9bb03b429cde86d491e808bf381a9b2c8398db990dfcdabf
+   appId: "SPD_OZONE-CI06618727-CI06618727-202410160000000000"
+   restlogsHost: tvlss-log000003.dev.df.sbrf.ru
+diff --git a/values/values-ift.yaml b/values/values-ift.yaml
+index 77ac5c9..009b542 100644
+--- a/values/values-ift.yaml
++++ b/values/values-ift.yaml
+@@ -153,8 +153,8 @@ kubelatte:
+ fluentBit:
+   enabled: true
+   image:
+-    registry: docker-release.registry-ci.delta.sbrf.ru/ci03978861/ci03978861
+-    repository: fluent-bit@sha256
++    registry: docker-release.registry-ci.delta.sbrf.ru
++    repository: ci03978861/ci03978861/fluent-bit@sha256
+     tag: e2c58d93e045585c9bb03b429cde86d491e808bf381a9b2c8398db990dfcdabf
+   appId: "SPD_OZONE-CI06618727-CI06618727-202410160000000000"
+   restlogsHost: tvlss-log000003.ift.df.sbrf.ru
