@@ -1,0 +1,215 @@
+diff --git a/helm-charts/ozone/templates/fluentbit/configmap.yaml b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+index 0e6576b..ae09dda 100644
+--- a/helm-charts/ozone/templates/fluentbit/configmap.yaml
++++ b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+@@ -47,12 +47,20 @@ data:
+         Name           modify
+         Match          *
+         Add            app_id {{ .Values.fluentBit.appId | quote }}
+-        Add            type_id "Audit"
+         Add            component ${FLUENTBIT_COMPONENT}
+         Add            pod_name ${HOSTNAME}
+         Add            namespace ${POD_NAMESPACE}
+         Rename         log message
+ 
++    # Per-event classification: assigns type_id (Audit/Tech) and subtype_id
++    # (A2/A3 auth, C1..C6 data) per the corporate audit-event registry.
++    # Mirrors the VRL rules in the Ambari/Vector pipeline.
++    [FILTER]
++        Name    lua
++        Match   *
++        script  /fluent-bit/etc/enrich.lua
++        call    classify
++
+     [FILTER]
+         Name    lua
+         Match   *
+@@ -67,6 +75,188 @@ data:
+         Format     json
+ 
+   enrich.lua: |
++    -- Components that emit OmAudit-formatted *-audit.log
++    local OM_AUDIT_COMPONENTS = { om = true, scm = true, datanode = true, s3g = true }
++
++    local function set_audit_defaults(record, process_name)
++        record["type_id"]      = "Audit"
++        record["PROCESS_NAME"] = process_name
++        record["OBJECT_ID"]    = -1
++        record["SESSION_ID"]   = "NONE"
++        record["FQDN_ADDRESS"] = "NONE"
++        record["TRACE_ID"]     = "NONE"
++        record["subtype_id"]   = record["subtype_id"] or "none"
++    end
++
++    -- OmAudit lines look like:
++    --   <ts> | <LEVEL> | OMAudit | user=U | ip=I | op=OP {OBJ} | ret=STATUS ...
++    local function classify_om_audit(record, message)
++        local user, ip, op, obj, status = string.match(message,
++            "user=([^%s|]+)%s+|%s+ip=([^%s|]+)%s+|%s+op=([^%s|{]+)%s+{([^}]*)}%s+|%s+ret=([^%s|]+)")
++        if not user then
++            return false
++        end
++
++        set_audit_defaults(record, "OZONE_AUDIT")
++        record["USER_LOGIN"]  = user
++        record["IP_ADDRESS"]  = ip
++        record["OBJECT_NAME"] = obj
++        record["STATUS"]      = status
++        record["OBJECT_PROPERTIES"] = { OPERATION = op }
++
++        if status ~= "SUCCESS" then
++            record["STATUS"] = "FAIL"
++            record["REASON"] = "NOT ENOUGH RIGHTS"
++        end
++
++        local READ   = "GET_SERVICE_LIST|^GET|LISTSTATUS|LOOKUP|CHECKACCESS|METADATA|OPEN|DESCRIBE"
++        local WRITE  = "CREATE|SETSTORAGEPOLICY|RENAME|APPEND|UPDATE|SYNC|WRITE|CHANGEOWNER|CHANGEGROUP|UTIMES|SETACL|TRUNCATE"
++        local DELETE = "DELETE|PURGE|RMDIR|UNLINK|ABANDONBLOCKS|DELETEDIRECTORY"
++
++        local function any_match(s, alts)
++            for alt in string.gmatch(alts, "[^|]+") do
++                if string.find(s, alt) then return true end
++            end
++            return false
++        end
++
++        if any_match(op, READ) then
++            record["subtype_id"] = (status == "SUCCESS") and "C1" or "C2"
++        elseif any_match(op, WRITE) then
++            record["subtype_id"] = (status == "SUCCESS") and "C3" or "C4"
++        elseif any_match(op, DELETE) then
++            record["subtype_id"] = (status == "SUCCESS") and "C5" or "C6"
++        else
++            record["tags"] = "ozone_audit_unclassify"
++        end
++        return true
++    end
++
++    -- Auth lines logged by IPC layer in <component>.log:
++    --   ... for <USER> (auth:KERBEROS) ... Auth successful|Auth failed
++    local function classify_om_auth(record, message)
++        local is_success = string.find(message, "Auth successful") ~= nil
++        local is_fail    = string.find(message, "Auth failed")     ~= nil
++        if not (is_success or is_fail) then
++            return false
++        end
++
++        set_audit_defaults(record, "OZONE_AUDIT_AUTH")
++        local user = string.match(message, "for ([^%s]+) %(auth:")
++        if user then record["USER_LOGIN"] = user end
++        local ip = string.match(message, "(%d+%.%d+%.%d+%.%d+)")
++        if ip then record["IP_ADDRESS"] = ip end
++
++        if is_success then
++            record["STATUS"]     = "SUCCESS"
++            record["subtype_id"] = "A2"
++        else
++            record["STATUS"]     = "FAIL"
++            record["subtype_id"] = "A3"
++        end
++        return true
++    end
++
++    -- HiveMetastore.audit lines: "... ugi=U ip=I cmd=C"
++    -- Login lines: "Login successful for <U>" / "Login failure for <U>"
++    local function classify_hive(record, message)
++        if string.find(message, "HiveMetaStore.audit") then
++            local user, ip, cmd = string.match(message, "ugi=(%S+)%s+ip=(%S+)%s+cmd=(.+)")
++            if not user then return false end
++            set_audit_defaults(record, "OZONE_AUDIT_HIVE")
++            record["USER_LOGIN"]  = user
++            record["IP_ADDRESS"]  = ip
++            record["OBJECT_NAME"] = cmd
++            record["STATUS"]      = "SUCCESS"
++            local lc = string.lower(cmd)
++            if string.find(lc, "select") or string.find(lc, "get") then
++                record["subtype_id"] = "C1"
++            elseif string.find(lc, "alter") or string.find(lc, "create")
++                or string.find(lc, "update") or string.find(lc, "insert") then
++                record["subtype_id"] = "C3"
++            elseif string.find(lc, "drop") then
++                record["subtype_id"] = "C5"
++            end
++            return true
++        end
++
++        local is_success = string.find(message, "Login successful") ~= nil
++        local is_fail    = string.find(message, "Login failure")    ~= nil
++        if is_success or is_fail then
++            set_audit_defaults(record, "OZONE_AUDIT_HIVE")
++            local user = string.match(message, "for ([^%s]+)")
++            if user then record["USER_LOGIN"] = user end
++            if is_success then
++                record["STATUS"]     = "SUCCESS"
++                record["subtype_id"] = "A2"
++            else
++                record["STATUS"]     = "FAIL"
++                record["REASON"]     = "INCORRECT LOGIN/PASSWORD"
++                record["subtype_id"] = "A3"
++            end
++            return true
++        end
++
++        return false
++    end
++
++    -- Hue access.log: "[<ts>] WARNING  <IP> <USER> --- <RESULT> <USER_LOGIN>"
++    local function classify_hue(record, message)
++        local ip, result = string.match(message,
++            "WARNING%s+(%S+)%s+%S+%s+%-%-%-%s+(.-:)%s+%S+")
++        if not result then return false end
++        local user_login = string.match(message, "%-%-%-%s+.-:%s+(%S+)")
++
++        if string.find(result, "Successful login for user:") then
++            set_audit_defaults(record, "OZONE_AUDIT_HUE")
++            record["IP_ADDRESS"] = ip
++            if user_login then record["USER_LOGIN"] = user_login end
++            record["STATUS"]     = "SUCCESS"
++            record["subtype_id"] = "A2"
++            return true
++        elseif string.find(result, "Failed login for user:") then
++            set_audit_defaults(record, "OZONE_AUDIT_HUE")
++            record["IP_ADDRESS"] = ip
++            if user_login then record["USER_LOGIN"] = user_login end
++            record["STATUS"]     = "FAIL"
++            record["REASON"]     = "INCORRECT LOGIN/PASSWORD"
++            record["subtype_id"] = "A3"
++            return true
++        end
++        return false
++    end
++
++    -- Dispatch by tag + component. Tag is "audit" or "tech".
++    function classify(tag, ts, record)
++        local component = record["component"] or ""
++        local message   = record["message"]   or ""
++
++        if tag == "audit" then
++            if OM_AUDIT_COMPONENTS[component] then
++                if classify_om_audit(record, message) then return 1, ts, record end
++            elseif component == "hivemetastore" then
++                if classify_hive(record, message) then return 1, ts, record end
++            end
++            -- audit-tagged but couldn't parse: keep but flag
++            record["type_id"]    = "Audit"
++            record["subtype_id"] = "none"
++            record["tags"]       = "ozone_audit_unclassify"
++            return 1, ts, record
++        end
++
++        -- tag == "tech"
++        if OM_AUDIT_COMPONENTS[component] then
++            if classify_om_auth(record, message) then return 1, ts, record end
++        elseif component == "hue" then
++            if classify_hue(record, message) then return 1, ts, record end
++        elseif component == "hivemetastore" then
++            if classify_hive(record, message) then return 1, ts, record end
++        end
++
++        record["type_id"] = "Tech"
++        return 1, ts, record
++    end
++
+     function prepend_meta(tag, ts, record)
+         local prefix = "[cluster=" .. (record["namespace"] or "") .. " pod=" .. (record["pod_name"] or "") .. "] "
+         record["message"] = prefix .. (record["message"] or "")
