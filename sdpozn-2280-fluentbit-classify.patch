@@ -1,0 +1,333 @@
+diff --git a/helm-charts/ozone/templates/fluentbit/configmap.yaml b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+index 0e6576b..a50dada 100644
+--- a/helm-charts/ozone/templates/fluentbit/configmap.yaml
++++ b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+@@ -47,12 +47,20 @@ data:
+         Name           modify
+         Match          *
+         Add            app_id {{ .Values.fluentBit.appId | quote }}
+-        Add            type_id "Audit"
+         Add            component ${FLUENTBIT_COMPONENT}
+         Add            pod_name ${HOSTNAME}
+         Add            namespace ${POD_NAMESPACE}
+         Rename         log message
+ 
++    # Per-event classification: assigns type_id (Audit/Tech) and subtype_id
++    # (A2/A3 auth, C1..C6 data) per the corporate audit-event registry.
++    # Mirrors the VRL rules in the Ambari/Vector pipeline.
++    [FILTER]
++        Name    lua
++        Match   *
++        script  /fluent-bit/etc/enrich.lua
++        call    classify
++
+     [FILTER]
+         Name    lua
+         Match   *
+@@ -66,7 +74,286 @@ data:
+         Port       {{ .Values.fluentBit.restlogsPort }}
+         Format     json
+ 
++    {{- if .Values.fluentBit.debug }}
++    # Debug duplicate of the outbound payload to the sidecar's stdout.
++    # `kubectl logs <pod> -c fluent-bit` shows every record (and its fields)
++    # right before it leaves for the external aggregator. JSON Lines so it
++    # stays grep-friendly. Disable in production via fluentBit.debug=false.
++    [OUTPUT]
++        Name       stdout
++        Match      *
++        Format     json_lines
++        json_date_key    timestamp
++        json_date_format iso8601
++    {{- end }}
++
+   enrich.lua: |
++    -- Components that emit Audit-formatted *-audit.log
++    local AUDIT_COMPONENTS = { om = true, scm = true, datanode = true, s3g = true }
++
++    -- Tech log level filter. Rank 0 = disabled. Rendered from
++    -- .Values.fluentBit.techMinLevel at chart install time.
++    local LEVEL_RANK = { TRACE = 1, DEBUG = 2, INFO = 3, WARN = 4, ERROR = 5, FATAL = 6 }
++    local TECH_MIN_RANK = {{ get (dict "TRACE" 1 "DEBUG" 2 "INFO" 3 "WARN" 4 "ERROR" 5 "FATAL" 6) (default "" .Values.fluentBit.techMinLevel) | default 0 }}
++
++    local function detect_level(message)
++        return string.match(message, "%s(TRACE)%s")
++            or string.match(message, "%s(DEBUG)%s")
++            or string.match(message, "%s(INFO)%s")
++            or string.match(message, "%s(WARN)%s")
++            or string.match(message, "%s(ERROR)%s")
++            or string.match(message, "%s(FATAL)%s")
++    end
++
++    local function set_audit_defaults(record, process_name)
++        record["type_id"]      = "Audit"
++        record["PROCESS_NAME"] = process_name
++        record["OBJECT_ID"]    = -1
++        record["SESSION_ID"]   = "NONE"
++        record["FQDN_ADDRESS"] = "NONE"
++        record["TRACE_ID"]     = "NONE"
++        record["subtype_id"]   = record["subtype_id"] or "none"
++    end
++
++    local function match_any(s, prefixes)
++        for _, p in ipairs(prefixes) do
++            if string.find(s, p) then return true end
++        end
++        return false
++    end
++
++    -- Per-service op→kind tables. Each Ozone service has its own action enum
++    -- (OMAction / SCMAction / S3GAction / DNAction) so prefix sets differ.
++    -- Within each service, order is delete → write → read; first match wins,
++    -- which keeps e.g. DELETE_KEY out of the write bucket.
++    local SERVICE_OPS = {
++      om = {
++        delete = { "^DELETE", "^ABORT_MULTIPART", "^REVOKE", "^CANCEL_DELEGATION", "^REMOVE_ACL" },
++        write  = { "^CREATE", "^ALLOCATE", "^COMMIT", "^COMPLETE", "^INITIATE", "^RECOVER",
++                   "^RENAME", "^SET", "^ADD", "^APPLY", "^RENEW", "^PUT", "^TRUNCATE" },
++        read   = { "^GET", "^READ", "^LIST", "^LOOKUP", "^INFO", "^CHECK", "^DESCRIBE" },
++      },
++      scm = {
++        delete = { "^DELETE", "^REMOVE_PIPELINE", "^DEACTIVATE", "^CLOSE_CONTAINER",
++                   "^STOP_REPLICATION", "^FORCE_EXIT" },
++        write  = { "^CREATE", "^ALLOCATE", "^REGISTER", "^SEND_HEARTBEAT", "^SET",
++                   "^START_REPLICATION", "^FINALIZE", "^REPORT_BAD", "^TRANSFER_LEADERSHIP" },
++        read   = { "^GET", "^LIST", "^READ", "^IN_SAFE_MODE" },
++      },
++      s3g = {
++        delete = { "^DELETE", "^ABORT" },
++        write  = { "^CREATE", "^PUT", "^WRITE", "^INIT", "^COMPLETE", "^COPY",
++                   "^SET", "^UPLOAD", "^MULTIPART" },
++        read   = { "^GET", "^READ", "^LIST", "^HEAD" },
++      },
++      datanode = {
++        delete = { "^DELETE", "^CLOSE_CONTAINER" },
++        write  = { "^WRITE", "^PUT", "^CREATE", "^FINALIZE_BLOCK", "^COMMIT" },
++        read   = { "^READ", "^GET", "^LIST" },
++      },
++    }
++
++    local function op_kind(component, op)
++        local rules = SERVICE_OPS[component]
++        if not rules then return nil end
++        if match_any(op, rules.delete) then return "delete" end
++        if match_any(op, rules.write)  then return "write"  end
++        if match_any(op, rules.read)   then return "read"   end
++        return nil
++    end
++
++    -- Audit lines look like:
++    --   <ts> | <LEVEL> | <Logger> | user=U | ip=I | op=OP {OBJ} | ret=STATUS ...
++    -- Same line format across OM/SCM/S3G/Datanode; only the op enum differs.
++    local function classify_audit_line(record, component, message)
++        local user, ip, op, obj, status = string.match(message,
++            "user=([^%s|]+)%s+|%s+ip=([^%s|]+)%s+|%s+op=([^%s|{]+)%s+{([^}]*)}%s+|%s+ret=([^%s|]+)")
++        if not user then
++            return false
++        end
++
++        set_audit_defaults(record, "OZONE_AUDIT_" .. string.upper(component))
++        record["USER_LOGIN"]  = user
++        record["IP_ADDRESS"]  = ip
++        record["OBJECT_NAME"] = obj
++        record["STATUS"]      = status
++        record["OBJECT_PROPERTIES"] = { OPERATION = op }
++
++        if status ~= "SUCCESS" then
++            record["STATUS"] = "FAIL"
++            record["REASON"] = "NOT ENOUGH RIGHTS"
++        end
++
++        local kind = op_kind(component, op)
++        if kind == "delete" then
++            record["subtype_id"] = (status == "SUCCESS") and "C5" or "C6"
++        elseif kind == "write" then
++            record["subtype_id"] = (status == "SUCCESS") and "C3" or "C4"
++        elseif kind == "read" then
++            record["subtype_id"] = (status == "SUCCESS") and "C1" or "C2"
++        else
++            record["tags"] = "ozone_audit_unclassify"
++        end
++        return true
++    end
++
++    -- ---------- Tech-log promoters ----------
++    -- A "promoter" inspects a single tech-tagged line and, if it recognises
++    -- a security-relevant event, rewrites the record into an Audit one and
++    -- returns true. Misses return false and the line stays as type_id=Tech.
++    -- Each promoter is responsible for one log style; per-service dispatch
++    -- happens via TECH_PROMOTERS[component] below.
++
++    -- Hadoop IPC SASL auth, shared by every service that uses Hadoop RPC
++    -- (OM/SCM/Datanode/S3G/HMS). Lines look like:
++    --   ... for <USER> (auth:KERBEROS) ... Auth successful
++    --   ... Auth failed for ...
++    local function promote_hadoop_ipc_auth(record, component, message)
++        local is_success = string.find(message, "Auth successful") ~= nil
++        local is_fail    = string.find(message, "Auth failed")     ~= nil
++        if not (is_success or is_fail) then return false end
++
++        set_audit_defaults(record, "OZONE_AUTH_" .. string.upper(component))
++        local user = string.match(message, "for ([^%s]+) %(auth:")
++        if user then record["USER_LOGIN"] = user end
++        local ip = string.match(message, "(%d+%.%d+%.%d+%.%d+)")
++        if ip then record["IP_ADDRESS"] = ip end
++
++        if is_success then
++            record["STATUS"]     = "SUCCESS"
++            record["subtype_id"] = "A2"
++        else
++            record["STATUS"]     = "FAIL"
++            record["subtype_id"] = "A3"
++        end
++        return true
++    end
++
++    -- HiveMetaStore.audit lines (HMS audit goes into the regular tech log,
++    -- since hivemetastore has no *-audit.log in this chart):
++    --   ... HiveMetaStore.audit ... ugi=U ip=I cmd=C ...
++    local function promote_hms_audit_cmd(record, component, message)
++        if not string.find(message, "HiveMetaStore.audit") then return false end
++        local user, ip, cmd = string.match(message, "ugi=(%S+)%s+ip=(%S+)%s+cmd=(.+)")
++        if not user then return false end
++
++        set_audit_defaults(record, "OZONE_AUDIT_HIVEMETASTORE")
++        record["USER_LOGIN"]  = user
++        record["IP_ADDRESS"]  = ip
++        record["OBJECT_NAME"] = cmd
++        record["STATUS"]      = "SUCCESS"
++
++        local lc = string.lower(cmd)
++        if string.find(lc, "drop") then
++            record["subtype_id"] = "C5"
++        elseif string.find(lc, "alter") or string.find(lc, "create")
++            or string.find(lc, "update") or string.find(lc, "insert") then
++            record["subtype_id"] = "C3"
++        elseif string.find(lc, "select") or string.find(lc, "get") then
++            record["subtype_id"] = "C1"
++        end
++        return true
++    end
++
++    -- Hive Login successful / Login failure for <U>
++    local function promote_hms_login(record, component, message)
++        local is_success = string.find(message, "Login successful") ~= nil
++        local is_fail    = string.find(message, "Login failure")    ~= nil
++        if not (is_success or is_fail) then return false end
++
++        set_audit_defaults(record, "OZONE_AUTH_HIVEMETASTORE")
++        local user = string.match(message, "for ([^%s]+)")
++        if user then record["USER_LOGIN"] = user end
++        if is_success then
++            record["STATUS"]     = "SUCCESS"
++            record["subtype_id"] = "A2"
++        else
++            record["STATUS"]     = "FAIL"
++            record["REASON"]     = "INCORRECT LOGIN/PASSWORD"
++            record["subtype_id"] = "A3"
++        end
++        return true
++    end
++
++    -- Hue access.log: "[<ts>] WARNING  <IP> <USER> --- <RESULT> <USER_LOGIN>"
++    -- Hue uses the same auth_logger for login and logout, so one regex
++    -- handles A1 (Sign Out), A2 (Sign In), A3 (Fail sign in).
++    local function promote_hue_session(record, component, message)
++        local ip, result = string.match(message,
++            "WARNING%s+(%S+)%s+%S+%s+%-%-%-%s+(.-:)%s+%S+")
++        if not result then return false end
++        local user_login = string.match(message, "%-%-%-%s+.-:%s+(%S+)")
++
++        local subtype, status, reason
++        if string.find(result, "Successful login for user:") then
++            subtype, status = "A2", "SUCCESS"
++        elseif string.find(result, "Failed login for user:") then
++            subtype, status, reason = "A3", "FAIL", "INCORRECT LOGIN/PASSWORD"
++        elseif string.find(result, "Successful logout for user:") then
++            subtype, status = "A1", "SUCCESS"
++        else
++            return false
++        end
++
++        set_audit_defaults(record, "OZONE_AUTH_HUE")
++        record["IP_ADDRESS"] = ip
++        if user_login then record["USER_LOGIN"] = user_login end
++        record["STATUS"]     = status
++        record["subtype_id"] = subtype
++        if reason then record["REASON"] = reason end
++        return true
++    end
++
++    -- Per-component list of promoters tried in order against tech-tagged
++    -- records. First match wins; all misses keep the line as type_id=Tech.
++    -- Add service-specific promoters here without touching the dispatcher.
++    local TECH_PROMOTERS = {
++        om            = { promote_hadoop_ipc_auth },
++        scm           = { promote_hadoop_ipc_auth },
++        datanode      = { promote_hadoop_ipc_auth },
++        s3g           = { promote_hadoop_ipc_auth },
++        hue           = { promote_hue_session },
++        hivemetastore = { promote_hms_audit_cmd, promote_hms_login, promote_hadoop_ipc_auth },
++    }
++
++    -- Dispatch by tag + component. Tag is "audit" or "tech".
++    function classify(tag, ts, record)
++        local component = record["component"] or ""
++        local message   = record["message"]   or ""
++
++        if tag == "audit" then
++            -- Only AUDIT_COMPONENTS produce real audit-tagged records;
++            -- the others tail a non-existent .no-audit file so this branch
++            -- never sees them.
++            if AUDIT_COMPONENTS[component]
++               and classify_audit_line(record, component, message) then
++                return 1, ts, record
++            end
++            -- audit-tagged but couldn't parse: keep but flag
++            record["type_id"]    = "Audit"
++            record["subtype_id"] = "none"
++            record["tags"]       = "ozone_audit_unclassify"
++            return 1, ts, record
++        end
++
++        -- tag == "tech": optional level filter, then service-specific
++        -- promoters; first promoter hit wins, otherwise stays as Tech.
++        if TECH_MIN_RANK > 0 then
++            local lvl = detect_level(message)
++            if lvl and (LEVEL_RANK[lvl] or 0) < TECH_MIN_RANK then
++                return -1, ts, record
++            end
++        end
++
++        local promoters = TECH_PROMOTERS[component] or {}
++        for _, fn in ipairs(promoters) do
++            if fn(record, component, message) then return 1, ts, record end
++        end
++
++        record["type_id"] = "Tech"
++        return 1, ts, record
++    end
++
+     function prepend_meta(tag, ts, record)
+         local prefix = "[cluster=" .. (record["namespace"] or "") .. " pod=" .. (record["pod_name"] or "") .. "] "
+         record["message"] = prefix .. (record["message"] or "")
+diff --git a/helm-charts/ozone/values.yaml b/helm-charts/ozone/values.yaml
+index 7a0e4b7..72a8668 100644
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -106,6 +106,15 @@ secman:
+ # Override image/appId/restlogsHost per environment in values-<env>.yaml.
+ fluentBit:
+   enabled: false
++  # When true, fluent-bit also dumps every outbound record to its own
++  # stdout (json_lines), so `kubectl logs <pod> -c fluent-bit` shows
++  # exactly which fields are being shipped to the external aggregator.
++  # Keep off in production.
++  debug: false
++  # Drop tech-tagged lines whose log4j level is below this threshold.
++  # Empty/unset = keep everything. Allowed: TRACE, DEBUG, INFO, WARN, ERROR, FATAL.
++  # Audit-tagged lines are never level-filtered.
++  techMinLevel: ""
+   image:
+     registry: "{{ .Values.global.image.registry }}"
+     repository: ""
