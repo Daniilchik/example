@@ -1,0 +1,289 @@
+diff --git a/helm-charts/ozone/templates/fluentbit/configmap.yaml b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+index 0e6576b..f012222 100644
+--- a/helm-charts/ozone/templates/fluentbit/configmap.yaml
++++ b/helm-charts/ozone/templates/fluentbit/configmap.yaml
+@@ -10,7 +10,6 @@ metadata:
+ data:
+   fluent-bit.conf: |-
+     [SERVICE]
+-        Config_Watch      On
+         Daemon            Off
+         Flush             1
+         HTTP_Listen       0.0.0.0
+@@ -24,7 +23,6 @@ data:
+         Path              ${FLUENTBIT_TECH_LOG_PATH}
+         DB                /tmp/fluent-bit-tech.db
+         DB.Sync           Normal
+-        Path_Key          source_file
+         Mem_Buf_Limit     5MB
+         Skip_Long_Lines   On
+         Refresh_Interval  10
+@@ -35,29 +33,16 @@ data:
+         Path              ${FLUENTBIT_AUDIT_LOG_PATH}
+         DB                /tmp/fluent-bit-audit.db
+         DB.Sync           Normal
+-        Path_Key          source_file
+         Mem_Buf_Limit     5MB
+         Skip_Long_Lines   On
+         Refresh_Interval  10
+ 
+-    # ${HOSTNAME} is set by container runtime to the pod name.
+-    # k8s downward API ($(POD_NAME)) is not used because fluent-bit fails
+-    # to expand env vars sourced from valueFrom.fieldRef on this image.
+-    [FILTER]
+-        Name           modify
+-        Match          *
+-        Add            app_id {{ .Values.fluentBit.appId | quote }}
+-        Add            type_id "Audit"
+-        Add            component ${FLUENTBIT_COMPONENT}
+-        Add            pod_name ${HOSTNAME}
+-        Add            namespace ${POD_NAMESPACE}
+-        Rename         log message
+-
++    # Adds metadata, classifies type_id/subtype_id, prepends [cluster=… pod=…].
+     [FILTER]
+         Name    lua
+         Match   *
+         script  /fluent-bit/etc/enrich.lua
+-        call    prepend_meta
++        call    enrich
+ 
+     [OUTPUT]
+         Name       http
+@@ -66,10 +51,217 @@ data:
+         Port       {{ .Values.fluentBit.restlogsPort }}
+         Format     json
+ 
++    {{- if .Values.fluentBit.debug }}
++    # Mirrors outbound payload to stdout: `kubectl logs <pod> -c fluent-bit`.
++    [OUTPUT]
++        Name       stdout
++        Match      *
++        Format     json_lines
++        json_date_key    timestamp
++        json_date_format iso8601
++    {{- end }}
++
+   enrich.lua: |
+-    function prepend_meta(tag, ts, record)
+-        local prefix = "[cluster=" .. (record["namespace"] or "") .. " pod=" .. (record["pod_name"] or "") .. "] "
+-        record["message"] = prefix .. (record["message"] or "")
++    -- Mirrors VRL transforms in vector.yaml.j2 (add_ozone_om_audit /
++    -- add_ozone_om_auth_audit / add_hive_tags / add_hue_tags).
++
++    -- Per-pod constants, resolved once at module load.
++    local APP_ID    = {{ .Values.fluentBit.appId | quote }}
++    local COMPONENT = os.getenv("FLUENTBIT_COMPONENT") or ""
++    local POD_NAME  = os.getenv("HOSTNAME")            or ""
++    local NAMESPACE = os.getenv("POD_NAMESPACE")       or ""
++    local META_PREFIX = "[cluster=" .. NAMESPACE .. " pod=" .. POD_NAME .. "] "
++
++    local function set_audit_defaults(record, process_name)
++        record["type_id"]      = "Audit"
++        record["PROCESS_NAME"] = process_name
++        record["OBJECT_ID"]    = -1
++        record["SESSION_ID"]   = "NONE"
++        record["FQDN_ADDRESS"] = "NONE"
++        record["TRACE_ID"]     = "NONE"
++        record["subtype_id"]   = record["subtype_id"] or "none"
++    end
++
++    local function match_any(s, patterns)
++        for _, p in ipairs(patterns) do
++            if string.find(s, p) then return true end
++        end
++        return false
++    end
++
++    -- Op classification. Base set is vector's VRL regex; ^READ/^LIST/
++    -- ^ALLOCATE/^COMMIT added on top to cover Ozone OM ops vector missed
++    -- (READ_VOLUME, READ_BUCKET, LIST_KEYS, ALLOCATE_KEY, COMMIT_KEY, ...).
++    local READ_OPS   = { "GET_SERVICE_LIST", "^GET", "LISTSTATUS", "LOOKUP",
++                         "CHECKACCESS", "METADATA", "OPEN", "DESCRIBE",
++                         "^READ", "^LIST" }
++    local WRITE_OPS  = { "CREATE", "SETSTORAGEPOLICY", "RENAME", "APPEND",
++                         "UPDATE", "SYNC", "WRITE", "CHANGEOWNER", "CHANGEGROUP",
++                         "UTIMES", "SETACL", "TRUNCATE",
++                         "^ALLOCATE", "^COMMIT" }
++    local DELETE_OPS = { "DELETE", "PURGE", "RMDIR", "UNLINK", "ABANDONBLOCKS",
++                         "DELETEDIRECTORY" }
++
++    -- Format: <ts> | <LEVEL> | OMAudit | user=U | ip=I | op=OP {OBJ} | ret=STATUS
++    local function classify_audit_line(record, message)
++        local user, ip, op, obj, status = string.match(message,
++            "user=([^%s|]+)%s+|%s+ip=([^%s|]+)%s+|%s+op=([^%s|{]+)%s+{([^}]*)}%s+|%s+ret=([^%s|]+)")
++        if not user then return false end
++
++        set_audit_defaults(record, "OZONE_AUDIT")
++        record["USER_LOGIN"]  = user
++        record["IP_ADDRESS"]  = ip
++        record["OBJECT_NAME"] = obj
++        record["STATUS"]      = status
++        record["OBJECT_PROPERTIES"] = { OPERATION = op }
++
++        if status ~= "SUCCESS" then
++            record["STATUS"] = "FAIL"
++            record["REASON"] = "NOT ENOUGH RIGHTS"
++        end
++
++        if match_any(op, READ_OPS) then
++            record["subtype_id"] = (status == "SUCCESS") and "C1" or "C2"
++        elseif match_any(op, WRITE_OPS) then
++            record["subtype_id"] = (status == "SUCCESS") and "C3" or "C4"
++        elseif match_any(op, DELETE_OPS) then
++            record["subtype_id"] = (status == "SUCCESS") and "C5" or "C6"
++        else
++            record["tags"] = "ozone_audit_unclassify"
++        end
++        return true
++    end
++
++    -- OM tech log: "for <U> (auth:KERBEROS) ... Auth successful|Auth failed"
++    local function promote_om_auth(record, message)
++        local is_success = string.find(message, "Auth successful") ~= nil
++        local is_fail    = string.find(message, "Auth failed")     ~= nil
++        if not (is_success or is_fail) then return false end
++
++        set_audit_defaults(record, "OZONE_AUDIT_AUTH")
++        local user = string.match(message, "for ([^%s]+) %(auth:")
++        if user then record["USER_LOGIN"] = user end
++        local ip = string.match(message, "(%d+%.%d+%.%d+%.%d+)")
++        if ip then record["IP_ADDRESS"] = ip end
++
++        if is_success then
++            record["STATUS"]     = "SUCCESS"
++            record["subtype_id"] = "A2"
++        else
++            record["STATUS"]     = "FAIL"
++            record["subtype_id"] = "A3"
++        end
++        return true
++    end
++
++    -- HMS tech log:
++    --   "HiveMetaStore.audit ... ugi=U ip=I cmd=C" → C1/C3/C5
++    --   "Login successful" / "Login failure for <U>" → A2/A3
++    local function promote_hms(record, message)
++        if string.find(message, "HiveMetaStore.audit") then
++            local user, ip, cmd = string.match(message,
++                "ugi=(%S+)%s+ip=(%S+)%s+cmd=(.+)")
++            if not user then return false end
++
++            set_audit_defaults(record, "OZONE_AUDIT_HIVE")
++            record["USER_LOGIN"]  = user
++            record["IP_ADDRESS"]  = ip
++            record["OBJECT_NAME"] = cmd
++            record["STATUS"]      = "SUCCESS"
++
++            local lc = string.lower(cmd)
++            if string.find(lc, "select") or string.find(lc, "get") then
++                record["subtype_id"] = "C1"
++            elseif string.find(lc, "alter") or string.find(lc, "create")
++                or string.find(lc, "update") or string.find(lc, "insert") then
++                record["subtype_id"] = "C3"
++            elseif string.find(lc, "drop") then
++                record["subtype_id"] = "C5"
++            end
++            return true
++        end
++
++        local is_success = string.find(message, "Login successful") ~= nil
++        local is_fail    = string.find(message, "Login failure")    ~= nil
++        if is_success or is_fail then
++            set_audit_defaults(record, "OZONE_AUDIT_HIVE")
++            local user = string.match(message, "for ([^%s]+)")
++            if user then record["USER_LOGIN"] = user end
++            if is_success then
++                record["STATUS"]     = "SUCCESS"
++                record["subtype_id"] = "A2"
++            else
++                record["STATUS"]     = "FAIL"
++                record["REASON"]     = "INCORRECT LOGIN/PASSWORD"
++                record["subtype_id"] = "A3"
++            end
++            return true
++        end
++        return false
++    end
++
++    -- Hue access.log: "[ts] WARNING IP USER --- <RESULT> <USER>" → A1/A2/A3
++    -- A1 (logout) is on top of vector — Hue uses the same auth_logger for
++    -- logout events ("Successful logout for user: <U>").
++    local function promote_hue(record, message)
++        local ip, result = string.match(message,
++            "WARNING%s+(%S+)%s+%S+%s+%-%-%-%s+(.-:)%s+%S+")
++        if not result then return false end
++        local user_login = string.match(message, "%-%-%-%s+.-:%s+(%S+)")
++
++        local subtype, status, reason
++        if string.find(result, "Successful login for user:") then
++            subtype, status = "A2", "SUCCESS"
++        elseif string.find(result, "Failed login for user:") then
++            subtype, status, reason = "A3", "FAIL", "INCORRECT LOGIN/PASSWORD"
++        elseif string.find(result, "Successful logout for user:") then
++            subtype, status = "A1", "SUCCESS"
++        else
++            return false
++        end
++
++        set_audit_defaults(record, "OZONE_AUDIT_HUE")
++        record["IP_ADDRESS"] = ip
++        if user_login then record["USER_LOGIN"] = user_login end
++        record["STATUS"]     = status
++        record["subtype_id"] = subtype
++        if reason then record["REASON"] = reason end
++        return true
++    end
++
++    local TECH_PROMOTERS_BY_COMPONENT = {
++        om            = { promote_om_auth },
++        hue           = { promote_hue },
++        hivemetastore = { promote_hms },
++    }
++    local PROMOTERS = TECH_PROMOTERS_BY_COMPONENT[COMPONENT] or {}
++
++    function enrich(tag, ts, record)
++        record["app_id"]    = APP_ID
++        record["component"] = COMPONENT
++        record["pod_name"]  = POD_NAME
++        record["namespace"] = NAMESPACE
++        if record["log"] ~= nil then
++            record["message"] = record["log"]
++            record["log"] = nil
++        end
++        local message = record["message"] or ""
++
++        if tag == "audit" then
++            if not classify_audit_line(record, message) then
++                record["type_id"]    = "Audit"
++                record["subtype_id"] = "none"
++                record["tags"]       = "ozone_audit_unclassify"
++            end
++        else
++            local promoted = false
++            for _, fn in ipairs(PROMOTERS) do
++                if fn(record, message) then promoted = true; break end
++            end
++            if not promoted then record["type_id"] = "Tech" end
++        end
++
++        record["message"] = META_PREFIX .. (record["message"] or "")
+         return 1, ts, record
+     end
+ {{- end }}
+diff --git a/helm-charts/ozone/values.yaml b/helm-charts/ozone/values.yaml
+index 7a0e4b7..389edf9 100644
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -106,6 +106,11 @@ secman:
+ # Override image/appId/restlogsHost per environment in values-<env>.yaml.
+ fluentBit:
+   enabled: false
++  # When true, fluent-bit also dumps every outbound record to its own
++  # stdout (json_lines), so `kubectl logs <pod> -c fluent-bit` shows
++  # exactly which fields are being shipped to the external aggregator.
++  # Keep off in production.
++  debug: false
+   image:
+     registry: "{{ .Values.global.image.registry }}"
+     repository: ""
