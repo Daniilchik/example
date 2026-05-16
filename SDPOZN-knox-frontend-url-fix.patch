@@ -1,0 +1,25 @@
+diff --git a/helm-charts/ozone/templates/knox/configmap.yaml b/helm-charts/ozone/templates/knox/configmap.yaml
+--- a/helm-charts/ozone/templates/knox/configmap.yaml
++++ b/helm-charts/ozone/templates/knox/configmap.yaml
+@@ -50,6 +50,21 @@ data:
+         <name>gateway.tls.keystore.password.alias</name>
+         <value>gateway-identity-passphrase</value>
+       </property>
++      <!-- Knox за nginx-ingress: без явного frontend URL Knox autodetect-ит
++           hostname через X-Forwarded-Host header, и тогда {$serviceUrl[...]}
++           в rewrite-rules резолвится в gateway URL (публичный hostname),
++           а не в backend URL из <url> топологии. Это вызывает петлю —
++           Knox dispatch отправляет запрос сам в себя через ingress,
++           получает SSL connection reset.
++           Решение: явно зафиксировать frontend URL. -->
++      <property>
++        <name>gateway.frontend.url</name>
++        <value>https://recon-ozone-dev-prizva.apps.a74we5tj.k8s.delta.sbrf.ru</value>
++      </property>
++      <property>
++        <name>gateway.xforwarded.enabled</name>
++        <value>false</value>
++      </property>
+     </configuration>
+
+   sdpozone.xml: |
