@@ -1,0 +1,45 @@
+diff --git a/helm-charts/ozone/templates/ingress.yaml b/helm-charts/ozone/templates/ingress.yaml
+--- a/helm-charts/ozone/templates/ingress.yaml
++++ b/helm-charts/ozone/templates/ingress.yaml
+@@ -3,6 +3,40 @@
+
+ {{- if .Values.knox.enabled }}
+ ---
++# Ingress #0 — redirect /gateway/sdpozone/ozone-recon[/] → .../index.html
++# Knox 2.x routes "/ozone-recon/**" не match-ит "/ozone-recon/" (пустой
++# суффикс). Без редиректа service не находится → диспатч на самого себя.
++# Используем permanent-redirect (annotation работает без snippets).
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: {{ .Values.recon.serviceName }}-knox-recon-redirect-slash
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++  annotations:
++    nginx.ingress.kubernetes.io/permanent-redirect: "/gateway/sdpozone/ozone-recon/index.html"
++    nginx.ingress.kubernetes.io/permanent-redirect-code: "302"
++spec:
++  ingressClassName: {{ .Values.recon.ingress.className }}
++  rules:
++    - host: {{ $reconHost }}
++      http:
++        paths:
++          - path: /gateway/sdpozone/ozone-recon/
++            pathType: Exact
++            backend:
++              service:
++                name: {{ .Values.knox.serviceName }}
++                port:
++                  number: {{ .Values.knox.service.port }}
++          - path: /gateway/sdpozone/ozone-recon
++            pathType: Exact
++            backend:
++              service:
++                name: {{ .Values.knox.serviceName }}
++                port:
++                  number: {{ .Values.knox.service.port }}
++---
+ # Ingress #1 — /gateway/* идёт на Knox БЕЗ auth-url.
+ # Если бы auth-url был и на этом пути — была бы бесконечная рекурсия
+ # (login страница защищена auth, который сам ведёт на login).
