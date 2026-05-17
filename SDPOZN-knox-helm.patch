@@ -1,0 +1,686 @@
+diff --git a/helm-charts/ozone/templates/NOTES.txt b/helm-charts/ozone/templates/NOTES.txt
+index 9461316..619cb95 100644
+--- a/helm-charts/ozone/templates/NOTES.txt
++++ b/helm-charts/ozone/templates/NOTES.txt
+@@ -46,7 +46,18 @@ Access endpoints:
+    - SCM UI:            kubectl port-forward -n {{ include "ozone.namespace" . }} svc/{{ .Values.scm.serviceName }} 9876:9876
+    {{- end }}
+    {{- if and .Values.recon.enabled .Values.recon.ingress.enabled }}
+-   - Recon UI:          https://{{ include "ozone.ingress.host" (dict "host" .Values.recon.ingress.host "component" .Values.recon.serviceName "ctx" .) }}
++   {{- $reconHost := include "ozone.ingress.host" (dict "host" .Values.recon.ingress.host "component" .Values.recon.serviceName "ctx" .) }}
++   {{- if .Values.knox.enabled }}
++   - Recon UI (Knox):   https://{{ $reconHost }}/gateway/sdpozone/ozone-recon/index.html
++   - Recon UI (direct): https://{{ $reconHost }}/
++   - Login form:        https://{{ $reconHost }}/gateway/knoxsso/knoxauth/login.html
++   - Logout:            https://{{ $reconHost }}/gateway/knoxsso/api/v1/websso?logout=true
++   {{- range .Values.knox.sso.users }}
++     (login: {{ .username }} / {{ .password }})
++   {{- end }}
++   {{- else }}
++   - Recon UI:          https://{{ $reconHost }}
++   {{- end }}
+    {{- else if .Values.recon.enabled }}
+    - Recon UI:          kubectl port-forward -n {{ include "ozone.namespace" . }} svc/{{ .Values.recon.serviceName }} 9888:9888
+    {{- end }}
+@@ -63,3 +74,6 @@ Access endpoints:
+    {{- if .Values.hiveMetastore.enabled }}
+    - HIVE METASTORE:    kubectl port-forward -n {{ include "ozone.namespace" . }} svc/{{ .Values.hiveMetastore.serviceName }} 9083:9083
+    {{- end }}
++   {{- if and .Values.knox.enabled .Values.knox.ingress.enabled }}
++   - Knox Gateway:      https://{{ include "ozone.ingress.host" (dict "host" .Values.knox.ingress.host "component" .Values.knox.serviceName "ctx" .) }}/gateway/sdpozone/
++   {{- end }}
+diff --git a/helm-charts/ozone/templates/_helpers.tpl b/helm-charts/ozone/templates/_helpers.tpl
+index cd6b111..b5514ae 100644
+--- a/helm-charts/ozone/templates/_helpers.tpl
++++ b/helm-charts/ozone/templates/_helpers.tpl
+@@ -114,6 +114,27 @@ Full FQDN for HiveMetastore service
+ {{ printf "%s.%s.svc.%s" .Values.hiveMetastore.serviceName (include "ozone.namespace" .) .Values.global.clusterDomain }}
+ {{- end -}}
+ 
++{{/*
++Full FQDN for Knox Gateway service
++*/}}
++{{- define "ozone.knox.fqdn" -}}
++{{ printf "%s.%s.svc.%s" .Values.knox.serviceName (include "ozone.namespace" .) .Values.global.clusterDomain }}
++{{- end -}}
++
++{{/*
++KnoxSSO whitelist regex matches base URL only (protocol://host[:port], no path).
++Auto-generated from recon.ingress.host if not set explicitly.
++*/}}
++{{- define "ozone.knox.sso.whitelistRegex" -}}
++{{- if .Values.knox.sso.whitelistRegex -}}
++{{- .Values.knox.sso.whitelistRegex -}}
++{{- else -}}
++{{- $reconHost := include "ozone.ingress.host" (dict "host" .Values.recon.ingress.host "component" .Values.recon.serviceName "ctx" .) -}}
++{{- $escaped := regexReplaceAll "\\." $reconHost "\\." -}}
++^https?://{{ $escaped }}(:[0-9]+)?$
++{{- end -}}
++{{- end -}}
++
+ {{- define "ozone.externalDbHost" -}}
+ {{- if regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" . -}}
+ {{- printf "ext-db-%s.mesh" (. | replace "." "-") -}}
+diff --git a/helm-charts/ozone/templates/ingress.yaml b/helm-charts/ozone/templates/ingress.yaml
+index 8c36624..6669093 100644
+--- a/helm-charts/ozone/templates/ingress.yaml
++++ b/helm-charts/ozone/templates/ingress.yaml
+@@ -1,5 +1,76 @@
+ {{- if and .Values.recon.enabled .Values.recon.ingress.enabled }}
++{{- $reconHost := include "ozone.ingress.host" (dict "host" .Values.recon.ingress.host "component" .Values.recon.serviceName "ctx" .) }}
++
++{{- if .Values.knox.enabled }}
+ ---
++# Redirect empty path /ozone-recon[/] -> /index.html (Knox 2.x route pattern requires non-empty suffix).
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: {{ .Values.recon.serviceName }}-knox-recon-redirect-slash
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++  annotations:
++    nginx.ingress.kubernetes.io/permanent-redirect: "/gateway/sdpozone/ozone-recon/index.html"
++    nginx.ingress.kubernetes.io/permanent-redirect-code: "302"
++spec:
++  ingressClassName: {{ .Values.recon.ingress.className }}
++  rules:
++    - host: {{ $reconHost }}
++      http:
++        paths:
++          - path: /gateway/sdpozone/ozone-recon/
++            pathType: Exact
++            backend:
++              service:
++                name: {{ .Values.knox.serviceName }}
++                port:
++                  number: {{ .Values.knox.service.port }}
++          - path: /gateway/sdpozone/ozone-recon
++            pathType: Exact
++            backend:
++              service:
++                name: {{ .Values.knox.serviceName }}
++                port:
++                  number: {{ .Values.knox.service.port }}
++---
++# /gateway/* -> Knox (login form + WebSSO). No auth-url here to avoid login redirect loop.
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: {{ .Values.recon.serviceName }}-knox-gateway
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++    app.kubernetes.io/component: ozone-recon-knox-gateway
++  annotations:
++    # Knox gateway listens on HTTPS 8443 with self-signed cert.
++    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
++    {{- with .Values.recon.ingress.annotations }}
++    {{- toYaml . | nindent 4 }}
++    {{- end }}
++spec:
++  ingressClassName: {{ .Values.recon.ingress.className }}
++  rules:
++    - host: {{ $reconHost }}
++      http:
++        paths:
++          - path: /gateway
++            pathType: Prefix
++            backend:
++              service:
++                name: {{ .Values.knox.serviceName }}
++                port:
++                  number: {{ .Values.knox.service.port }}
++  {{- if .Values.recon.ingress.tls }}
++  tls:
++    {{- toYaml .Values.recon.ingress.tls | nindent 4 }}
++  {{- end }}
++{{- end }}
++
++---
++# Recon root ingress. With knox.protection.enabled: nginx auth-url subrequest enforces JWT.
+ apiVersion: networking.k8s.io/v1
+ kind: Ingress
+ metadata:
+@@ -8,14 +79,21 @@ metadata:
+   labels:
+     {{- include "ozone.labels" . | nindent 4 }}
+     app.kubernetes.io/component: ozone-recon
+-  {{- with .Values.recon.ingress.annotations }}
+   annotations:
++    {{- with .Values.recon.ingress.annotations }}
+     {{- toYaml . | nindent 4 }}
+-  {{- end }}
++    {{- end }}
++    {{- if and .Values.knox.enabled .Values.knox.protection.enabled }}
++    # Full JWT enforcement via auth-url subrequest. Requires nginx-ingress snippet annotations.
++    nginx.ingress.kubernetes.io/auth-url: "https://{{ .Values.knox.serviceName }}.{{ include "ozone.namespace" . }}.svc.{{ .Values.global.clusterDomain }}:{{ .Values.knox.service.port }}/gateway/knoxsso/api/v1/websso"
++    nginx.ingress.kubernetes.io/auth-signin: "https://$host/gateway/knoxsso/knoxauth/login.html?originalUrl=https://$host$escaped_request_uri"
++    nginx.ingress.kubernetes.io/auth-snippet: |
++      proxy_ssl_verify off;
++    {{- end }}
+ spec:
+   ingressClassName: {{ .Values.recon.ingress.className }}
+   rules:
+-    - host: {{ include "ozone.ingress.host" (dict "host" .Values.recon.ingress.host "component" .Values.recon.serviceName "ctx" .) }}
++    - host: {{ $reconHost }}
+       http:
+         paths:
+           - path: /
+diff --git a/helm-charts/ozone/templates/istio/authorizationpolicy.yaml b/helm-charts/ozone/templates/istio/authorizationpolicy.yaml
+index af61460..a044b0b 100644
+--- a/helm-charts/ozone/templates/istio/authorizationpolicy.yaml
++++ b/helm-charts/ozone/templates/istio/authorizationpolicy.yaml
+@@ -130,4 +130,33 @@ spec:
+     {{- end }}
+ {{- end }}
+ 
++{{- if .Values.knox.enabled }}
++---
++apiVersion: security.istio.io/v1beta1
++kind: AuthorizationPolicy
++metadata:
++  name: {{ include "ozone.fullname" . }}-knox
++  namespace: {{ $ns }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++spec:
++  selector:
++    matchLabels:
++      component: {{ .Values.knox.component }}
++  action: ALLOW
++  rules:
++    - from:
++        - source:
++            principals:
++              - "cluster.local/ns/{{ $ns }}/sa/default"
++              {{- if and .Values.istio.ingressController.serviceAccount.name .Values.istio.ingressController.serviceAccount.namespace }}
++              - "cluster.local/ns/{{ .Values.istio.ingressController.serviceAccount.namespace }}/sa/{{ .Values.istio.ingressController.serviceAccount.name }}"
++              {{- end }}
++    {{- if not (and .Values.istio.ingressController.serviceAccount.name .Values.istio.ingressController.serviceAccount.namespace) }}
++    - to:
++        - operation:
++            ports: ["{{ .Values.knox.service.port }}"]
++    {{- end }}
++{{- end }}
++
+ {{- end }}
+diff --git a/helm-charts/ozone/templates/istio/sidecar.yaml b/helm-charts/ozone/templates/istio/sidecar.yaml
+index 12e4671..20169b6 100644
+--- a/helm-charts/ozone/templates/istio/sidecar.yaml
++++ b/helm-charts/ozone/templates/istio/sidecar.yaml
+@@ -310,4 +310,33 @@ spec:
+         {{- end }}
+ {{- end }}
+ 
++{{- if .Values.knox.enabled }}
++---
++apiVersion: networking.istio.io/v1beta1
++kind: Sidecar
++metadata:
++  name: {{ include "ozone.fullname" . }}-knox
++  namespace: {{ $ns }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++spec:
++  workloadSelector:
++    labels:
++      component: {{ .Values.knox.component }}
++  egress:
++    - hosts:
++        {{- if .Values.recon.enabled }}
++        - "./{{ .Values.recon.serviceName }}.{{ $ns }}.svc.{{ $dom }}"
++        {{- end }}
++        {{- if .Values.secman.enabled }}
++        - "./{{ .Values.secman.hostname }}"
++        {{- end }}
++        {{- if .Values.global.security.kerberos.enabled }}
++        - "./{{ required "global.security.kerberos.kdc.hostname is required when kerberos is enabled" .Values.global.security.kerberos.kdc.hostname }}"
++        {{- end }}
++        {{- if and .Values.fluentBit.enabled .Values.fluentBit.restlogsHost }}
++        - "./{{ .Values.fluentBit.restlogsHost }}"
++        {{- end }}
++{{- end }}
++
+ {{- end }}
+diff --git a/helm-charts/ozone/templates/knox/configmap.yaml b/helm-charts/ozone/templates/knox/configmap.yaml
+new file mode 100644
+index 0000000..4ec120d
+--- /dev/null
++++ b/helm-charts/ozone/templates/knox/configmap.yaml
+@@ -0,0 +1,133 @@
++{{- if .Values.knox.enabled }}
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: {{ include "ozone.fullname" . }}-knox-config
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++    app.kubernetes.io/component: ozone-knox
++data:
++  sdpozone.xml: |
++    <?xml version="1.0" encoding="UTF-8"?>
++    <topology>
++      <gateway>
++        <provider>
++          <role>federation</role>
++          <name>SSOCookieProvider</name>
++          <enabled>true</enabled>
++          <param>
++            <name>sso.authentication.provider.url</name>
++            <value>https://{{ include "ozone.ingress.host" (dict "host" .Values.recon.ingress.host "component" .Values.recon.serviceName "ctx" .) }}/gateway/knoxsso/api/v1/websso</value>
++          </param>
++        </provider>
++        <provider>
++          <role>identity-assertion</role>
++          <name>Default</name>
++          <enabled>true</enabled>
++        </provider>
++      </gateway>
++      <service>
++        <role>OZONE-RECON</role>
++        <url>http://{{ include "ozone.recon.fqdn" . }}:{{ .Values.recon.service.port }}</url>
++      </service>
++    </topology>
++
++  knoxsso.xml: |
++    <?xml version="1.0" encoding="UTF-8"?>
++    <topology>
++      <gateway>
++        <provider>
++          <role>webappsec</role>
++          <name>WebAppSec</name>
++          <enabled>true</enabled>
++          <param>
++            <name>xframe.options.enabled</name>
++            <value>true</value>
++          </param>
++        </provider>
++        <provider>
++          <role>authentication</role>
++          <name>ShiroProvider</name>
++          <enabled>true</enabled>
++          <param>
++            <name>sessionTimeout</name>
++            <value>30</value>
++          </param>
++          <param>
++            <name>redirectToUrl</name>
++            <value>/gateway/knoxsso/knoxauth/login.html</value>
++          </param>
++          {{- range .Values.knox.sso.users }}
++          <param>
++            <name>users.{{ .username }}</name>
++            <value>{{ .password }},{{ .roles }}</value>
++          </param>
++          <param>
++            <name>roles.{{ .roles }}</name>
++            <value>*</value>
++          </param>
++          {{- end }}
++          <!-- Shiro url order matters: /knoxauth/** anon for login form, /** authcBasic for JWT subject. -->
++          <param>
++            <name>urls./knoxauth/**</name>
++            <value>anon</value>
++          </param>
++          <param>
++            <name>urls./**</name>
++            <value>authcBasic</value>
++          </param>
++        </provider>
++        <provider>
++          <role>identity-assertion</role>
++          <name>Default</name>
++          <enabled>true</enabled>
++        </provider>
++      </gateway>
++      <service>
++        <role>KNOXSSO</role>
++        <param>
++          <name>knoxsso.cookie.secure.only</name>
++          <value>true</value>
++        </param>
++        <param>
++          <name>knoxsso.token.ttl</name>
++          <value>{{ int .Values.knox.sso.cookieTtl }}</value>
++        </param>
++        <param>
++          <name>knoxsso.redirect.whitelist.regex</name>
++          <value>{{ include "ozone.knox.sso.whitelistRegex" . }}</value>
++        </param>
++      </service>
++      <!-- knoxauth is bundled application from Knox image, serves login.html. -->
++      <application>
++        <name>knoxauth</name>
++      </application>
++    </topology>
++
++  gateway-site.xml: |
++    <?xml version="1.0" encoding="UTF-8"?>
++    <configuration>
++      <property>
++        <name>gateway.port</name>
++        <value>{{ .Values.knox.service.port }}</value>
++      </property>
++      <property>
++        <name>gateway.path</name>
++        <value>gateway</value>
++      </property>
++    </configuration>
++
++  gateway-log4j.properties: |
++    app.log.dir=${KNOX_LOG_DIR}
++    app.log.file=gateway.log
++    log4j.rootLogger=INFO, drfa
++    log4j.appender.drfa=org.apache.log4j.DailyRollingFileAppender
++    log4j.appender.drfa.File=${app.log.dir}/${app.log.file}
++    log4j.appender.drfa.DatePattern=.yyyy-MM-dd
++    log4j.appender.drfa.layout=org.apache.log4j.PatternLayout
++    log4j.appender.drfa.layout.ConversionPattern=%d{ISO8601} %-5p [%t] %c{2} - %m%n
++    log4j.logger.org.apache.knox.gateway.dispatch=DEBUG
++    log4j.logger.org.apache.knox.gateway.deploy=DEBUG
++    log4j.logger.org.apache.http.wire=INFO
++{{- end }}
+diff --git a/helm-charts/ozone/templates/knox/deployment.yaml b/helm-charts/ozone/templates/knox/deployment.yaml
+new file mode 100644
+index 0000000..c9ef210
+--- /dev/null
++++ b/helm-charts/ozone/templates/knox/deployment.yaml
+@@ -0,0 +1,126 @@
++{{- if .Values.knox.enabled }}
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: {{ .Values.knox.serviceName }}
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++    app.kubernetes.io/component: ozone-knox
++spec:
++  replicas: {{ .Values.knox.replicas }}
++  selector:
++    matchLabels:
++      {{- include "ozone.selectorLabels" . | nindent 6 }}
++      component: {{ .Values.knox.component }}
++  template:
++    metadata:
++      labels:
++        {{- include "ozone.selectorLabels" . | nindent 8 }}
++        {{- include "ozone.secmanLabels" . | nindent 8 }}
++        component: {{ .Values.knox.component }}
++      annotations:
++        checksum/knox-config: {{ include (print $.Template.BasePath "/knox/configmap.yaml") . | sha256sum }}
++        {{- include "ozone.secmanAnnotations" . | nindent 8 }}
++        {{- include "ozone.istioAnnotations" . | nindent 8 }}
++        vault.hashicorp.com/agent-inject-secret-knox-master-secret: 'true'
++        vault.hashicorp.com/agent-inject-template-knox-master-secret: |
++          {{`{{- with secret `}}"{{ .Values.secman.path }}"{{` -}}`}}
++          {{`{{ .Data.`}}{{ .Values.knox.secman.masterSecretKey }}{{` }}`}}
++          {{`{{- end }}`}}
++        vault.hashicorp.com/agent-run-as-same-user: 'true'
++        vault.hashicorp.com/agent-inject-perms-knox-master-secret: '0440'
++    spec:
++      securityContext:
++        {{- toYaml .Values.knox.podSecurityContext | nindent 8 }}
++      serviceAccountName: default
++      {{- with .Values.global.image.pullSecrets }}
++      imagePullSecrets:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      containers:
++        - name: knox
++          image: "{{ coalesce .Values.knox.image.registry .Values.global.image.registry }}/{{ .Values.knox.image.repository }}:{{ .Values.knox.image.tag }}"
++          imagePullPolicy: Always
++          securityContext:
++            {{- toYaml .Values.knox.securityContext | nindent 12 }}
++          ports:
++            - name: gateway
++              containerPort: {{ .Values.knox.service.port }}
++              protocol: TCP
++          # Init Knox master secret from Vault before starting gateway.
++          command:
++            - /bin/sh
++            - -c
++          args:
++            - |
++              set -ux
++              MASTER_FILE=/vault/secrets/knox-master-secret
++              for i in $(seq 1 60); do
++                  [ -s "$MASTER_FILE" ] && break
++                  echo "knox: waiting for $MASTER_FILE ($i/60)"
++                  sleep 2
++              done
++              [ -s "$MASTER_FILE" ] || { echo "knox: master not available"; exit 1; }
++              MASTER=$(cat "$MASTER_FILE")
++              if [ -d /home/knox/data/security ]; then
++                  rm -rf /home/knox/data/security
++              fi
++              /home/knox/bin/knoxcli.sh create-master --master "$MASTER" --force </dev/null
++              exec /home/knox/bin/gateway.sh start
++          env:
++            - name: KNOX_GATEWAY_OPTS
++              value: "-Djava.net.preferIPv4Stack=true -Djava.security.egd=file:/dev/./urandom -Xms256m -Xmx768m"
++            - name: JAVA_TOOL_OPTIONS
++              value: "-Djava.security.egd=file:/dev/./urandom -Xms256m -Xmx768m"
++            {{- if .Values.fluentBit.enabled }}
++            - name: KNOX_LOG_DIR
++              value: {{ .Values.fluentBit.logDir | quote }}
++            {{- end }}
++          volumeMounts:
++            - name: knox-config
++              mountPath: /home/knox/conf/gateway-site.xml
++              subPath: gateway-site.xml
++            - name: knox-config
++              mountPath: /home/knox/conf/topologies/sdpozone.xml
++              subPath: sdpozone.xml
++            - name: knox-config
++              mountPath: /home/knox/conf/topologies/knoxsso.xml
++              subPath: knoxsso.xml
++            - name: knox-config
++              mountPath: /home/knox/conf/gateway-log4j.properties
++              subPath: gateway-log4j.properties
++            - name: knox-data-security
++              mountPath: /home/knox/data/security
++            - name: knox-data-deployments
++              mountPath: /home/knox/data/deployments
++            {{- if .Values.fluentBit.enabled }}
++            {{- include "ozone.fluentbit.logsMount" . | nindent 12 }}
++            {{- end }}
++          livenessProbe:
++            tcpSocket:
++              port: {{ .Values.knox.service.port }}
++            initialDelaySeconds: 120
++            periodSeconds: 15
++            failureThreshold: 5
++          readinessProbe:
++            tcpSocket:
++              port: {{ .Values.knox.service.port }}
++            initialDelaySeconds: 60
++            periodSeconds: 10
++          {{- with .Values.knox.resources }}
++          resources:
++            {{- toYaml . | nindent 12 }}
++          {{- end }}
++      volumes:
++        {{- if .Values.fluentBit.enabled }}
++        {{- include "ozone.fluentbit.volumes" . | nindent 8 }}
++        {{- end }}
++        - name: knox-config
++          configMap:
++            name: {{ include "ozone.fullname" . }}-knox-config
++        - name: knox-data-security
++          emptyDir: {}
++        - name: knox-data-deployments
++          emptyDir: {}
++{{- end }}
+diff --git a/helm-charts/ozone/templates/knox/ingress.yaml b/helm-charts/ozone/templates/knox/ingress.yaml
+new file mode 100644
+index 0000000..f5abe35
+--- /dev/null
++++ b/helm-charts/ozone/templates/knox/ingress.yaml
+@@ -0,0 +1,34 @@
++{{- if and .Values.knox.enabled .Values.knox.ingress.enabled }}
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: {{ .Values.knox.serviceName }}
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++    app.kubernetes.io/component: ozone-knox
++  annotations:
++    # Knox принимает HTTPS на 8443 (терминирует TLS сам, с self-signed
++    # cert). Без этой аннотации nginx-ingress пойдёт plain HTTP → 400.
++    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
++    {{- with .Values.knox.ingress.annotations }}
++    {{- toYaml . | nindent 4 }}
++    {{- end }}
++spec:
++  ingressClassName: {{ .Values.knox.ingress.className }}
++  {{- with .Values.knox.ingress.tls }}
++  tls:
++    {{- toYaml . | nindent 4 }}
++  {{- end }}
++  rules:
++    - host: {{ include "ozone.ingress.host" (dict "host" .Values.knox.ingress.host "component" .Values.knox.serviceName "ctx" .) }}
++      http:
++        paths:
++          - path: /
++            pathType: Prefix
++            backend:
++              service:
++                name: {{ .Values.knox.serviceName }}
++                port:
++                  number: {{ .Values.knox.service.port }}
++{{- end }}
+diff --git a/helm-charts/ozone/templates/knox/service.yaml b/helm-charts/ozone/templates/knox/service.yaml
+new file mode 100644
+index 0000000..e0458f8
+--- /dev/null
++++ b/helm-charts/ozone/templates/knox/service.yaml
+@@ -0,0 +1,20 @@
++{{- if .Values.knox.enabled }}
++apiVersion: v1
++kind: Service
++metadata:
++  name: {{ .Values.knox.serviceName }}
++  namespace: {{ include "ozone.namespace" . }}
++  labels:
++    {{- include "ozone.labels" . | nindent 4 }}
++    app.kubernetes.io/component: ozone-knox
++spec:
++  type: ClusterIP
++  ports:
++    - port: {{ .Values.knox.service.port }}
++      targetPort: gateway
++      protocol: TCP
++      name: gateway
++  selector:
++    {{- include "ozone.selectorLabels" . | nindent 4 }}
++    component: {{ .Values.knox.component }}
++{{- end }}
+diff --git a/helm-charts/ozone/values.yaml b/helm-charts/ozone/values.yaml
+index 3d6a249..d66cffa 100644
+--- a/helm-charts/ozone/values.yaml
++++ b/helm-charts/ozone/values.yaml
+@@ -77,6 +77,7 @@ global:
+         s3g: "s3g_keytab_b64"
+         recon: "recon_keytab_b64"
+         hms: "hms_keytab_b64"
++        knox: "knox_keytab_b64"
+       # Директория в контейнере, куда пишется декодированный keytab
+       keytabDir: "/etc/security/keytabs"
+       # Таймауты ожидания Vault-файла с keytab
+@@ -264,6 +265,64 @@ recon:
+     host: ""
+     tls: []
+ 
++# Apache Knox Gateway — entrypoint for Recon UI with login form + JWT.
++knox:
++  enabled: false
++  replicas: 1
++  component: knox
++  serviceName: knox
++  image:
++    # Override per-environment; falls back to global.image.registry if empty
++    registry: ""
++    repository: knox
++    tag: "1.6.1"
++  resources:
++    requests:
++      memory: "1Gi"
++      cpu: "300m"
++    limits:
++      memory: "1Gi"
++      cpu: "1"
++  service:
++    port: 8443
++  # Knox image runs as UID 10001 (knox user), overrides global runAsUser=1000.
++  securityContext:
++    allowPrivilegeEscalation: false
++    runAsNonRoot: true
++    runAsUser: 10001
++    runAsGroup: 10001
++    seccompProfile:
++      type: RuntimeDefault
++    capabilities:
++      drop:
++      - ALL
++  podSecurityContext:
++    fsGroup: 10001
++  # KnoxSSO login form issues hadoop-jwt cookie via Shiro IniRealm.
++  sso:
++    # Inline users (plain text in configmap). For prod move to Vault via secman.
++    users:
++      - username: admin
++        password: admin-password
++        roles: admin
++    # JWT cookie TTL in millis.
++    cookieTtl: 3600000
++    # KnoxSSO post-login redirect whitelist regex. Empty = auto-generate from recon.ingress.host.
++    whitelistRegex: ""
++  # Knox master secret pulled from Vault via secman injector.
++  secman:
++    masterSecretKey: ""
++  # Enable nginx auth-url subrequest at recon ingress for full JWT enforcement.
++  # Requires snippet annotations enabled on nginx-ingress controller.
++  protection:
++    enabled: false
++  ingress:
++    enabled: false
++    className: nginx
++    host: ""
++    tls: []
++    annotations: {}
++
+ # S3 Gateway configuration
+ s3g:
+   enabled: true
+diff --git a/values/values-dev.yaml b/values/values-dev.yaml
+index bd0d95f..acade57 100644
+--- a/values/values-dev.yaml
++++ b/values/values-dev.yaml
+@@ -162,6 +162,22 @@ ranger:
+     caCertKey: "ranger_ca_cert"
+     truststorePasswordKey: "ranger_truststore_password"
+ 
++knox:
++  enabled: true
++  image:
++    repository: knox@sha256
++    tag: cf6a339d24673fe6a7745ecb0fe71e36d899cfcbc5911d681f6b3a3a516c20c9
++  secman:
++    masterSecretKey: knox_master_secret
++  sso:
++    users:
++      - username: admin
++        password: admin-password
++        roles: admin
++    whitelistRegex: ""
++  ingress:
++    enabled: false
++
+ cli:
+   image:
+     repository: ozone-cli@sha256
